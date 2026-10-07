@@ -1,0 +1,32 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Engine test page</title>
+<style>
+  #overlay { position: fixed; inset: 0; background: rgba(0,0,0,.3); display: none; }
+  .item { height: 120px; border: 1px solid #ccc; margin: 4px; }
+</style></head>
+<body>
+  <h1 id="heading">Engine test</h1>
+  <button id="real-btn" class="btn-primary" onclick="document.getElementById('out').textContent='clicked'">Apply now</button>
+  <div id="out"></div>
+
+  <label for="name">Your name</label><input id="name" name="name">
+  <button id="delayed-trigger" onclick="setTimeout(()=>{const d=document.createElement('div');d.id='late';d.textContent='I am late';document.body.appendChild(d)},800)">Spawn later</button>
+
+  <button id="spa" onclick="document.getElementById('route').textContent='Step 2'; history.pushState({}, '', '#step2')">Next step</button>
+  <div id="route">Step 1</div>
+
+  <a id="nav-link" href="page2.html">Go to page 2</a>
+  <a id="popup-link" href="page2.html" target="_blank">Open in new tab</a>
+
+  <button id="show-overlay" onclick="document.getElementById('overlay').style.display='block'; setTimeout(()=>document.getElementById('overlay').style.display='none', 600)">Overlay</button>
+  <div id="overlay"></div>
+
+  <div id="feed"></div>
+  <script>
+    let n = 0;
+    function more() { const feed = document.getElementById('feed'); if (n >= 45) return;
+      for (let i = 0; i < 15; i++) { const d = document.createElement('div'); d.className = 'item'; d.textContent = 'Job ' + (++n); feed.appendChild(d); } }
+    more();
+    window.addEventListener('scroll', () => { if (window.innerHeight + window.scrollY >= document.body.scrollHeight - 50) setTimeout(more, 200); });
+  </script>
+</body></html>

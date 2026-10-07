@@ -1,0 +1,31 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Apply - SmartRecruiters (mock)</title></head><body>
+<oc-oneclick-form style="display:block">
+ <section id="p1"><h2>Personal information</h2>
+  <spl-input data-label="First name" data-id="first-name-input"></spl-input>
+  <spl-input data-label="Last name" data-id="last-name-input"></spl-input>
+  <spl-input data-label="Email" data-id="email-input"></spl-input>
+  <spl-input data-label="Confirm your email" data-id="confirm-email-input"></spl-input>
+  <spl-input data-label="Phone number" data-id="phone-number-input"></spl-input>
+  <div><label for="resume">Resume</label><input type="file" id="resume" data-test="resume-upload"></div>
+ </section>
+ <section id="p2" hidden><h2>Screening questions</h2>
+  <fieldset><legend>Do you have experience with React?</legend>
+   <label><input type="radio" name="q1" value="Yes" required> Yes</label><label><input type="radio" name="q1" value="No"> No</label></fieldset>
+ </section>
+ <div id="confirm" hidden data-test="confirmation"><h2>Thank you for your application</h2></div>
+ <div id="err" class="error-message" hidden>Please fill in all required fields</div>
+ <button data-test="footer-next" id="next">Next</button>
+ <button data-test="footer-submit" id="submit" hidden>Submit</button>
+</oc-oneclick-form>
+<script>
+customElements.define('spl-input', class extends HTMLElement { connectedCallback() { const r = this.attachShadow({mode: 'open'});
+  r.innerHTML = '<label for="' + this.dataset.id + '">' + this.dataset.label + ' *</label><input id="' + this.dataset.id + '" required>'; } });
+const shadowVal = id => { for (const el of document.querySelectorAll('spl-input')) { const i = el.shadowRoot.getElementById(id); if (i) return i.value; } return ''; };
+document.getElementById('next').onclick = () => {
+  const ok = ['first-name-input','last-name-input','email-input','confirm-email-input','phone-number-input'].every(id => shadowVal(id).trim()) && document.getElementById('resume').files.length;
+  if (!ok) { document.getElementById('err').hidden = false; return; }
+  document.getElementById('err').hidden = true; document.getElementById('p1').hidden = true; document.getElementById('p2').hidden = false;
+  document.getElementById('next').hidden = true; document.getElementById('submit').hidden = false; };
+document.getElementById('submit').onclick = () => { if (!document.querySelector('input[name=q1]:checked')) { document.getElementById('err').hidden = false; return; }
+  document.getElementById('p2').hidden = true; document.getElementById('submit').hidden = true; document.getElementById('confirm').hidden = false; };
+</script></body></html>

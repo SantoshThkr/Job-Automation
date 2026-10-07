@@ -1,0 +1,106 @@
+"""Model -> JSON helpers for the API."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from app.models import AgentState, AnswerMemory, Application, ApplicationEvent, Job, QuestionAnswer
+
+
+def iso(dt: datetime | None) -> str | None:
+    return dt.isoformat(timespec="seconds") + "Z" if dt else None
+
+
+def screenshot_url(path: str | None) -> str | None:
+    return f"/api/screenshots/{Path(path).name}" if path else None
+
+
+def job_summary(job: Job) -> dict[str, Any]:
+    app = job.application
+    return {
+        "id": job.id,
+        "portal": job.portal,
+        "title": job.title,
+        "company": job.company,
+        "location": job.location,
+        "url": job.url,
+        "match_score": job.match_score,
+        "decision": job.decision,
+        "status": job.status,
+        "status_reason": job.status_reason,
+        "apply_type": job.apply_type,
+        "discovered_at": iso(job.discovered_at),
+        "updated_at": iso(job.updated_at),
+        "resume_id": (app.resume_id if app and app.resume_id else job.resume_id),
+        "applied_at": iso(app.applied_at) if app else None,
+        "ats_platform": app.ats_platform if app else None,
+        "frontend_ratio": (job.match_details or {}).get("frontend_ratio"),
+    }
+
+
+def qa_dict(qa: QuestionAnswer) -> dict[str, Any]:
+    return {
+        "id": qa.id, "question": qa.question, "field_type": qa.field_type, "options": qa.options or [],
+        "required": qa.required, "answer": qa.answer, "confidence": qa.confidence, "source": qa.source,
+        "needs_review": qa.needs_review, "note": qa.note,
+    }
+
+
+def event_dict(ev: ApplicationEvent) -> dict[str, Any]:
+    return {
+        "id": ev.id, "job_id": ev.job_id, "ts": iso(ev.ts), "level": ev.level, "type": ev.type,
+        "message": ev.message, "data": ev.data or {}, "screenshot": screenshot_url(ev.screenshot),
+    }
+
+
+def application_dict(app: Application | None) -> dict[str, Any] | None:
+    if app is None:
+        return None
+    return {
+        "id": app.id, "status": app.status, "mode": app.mode, "apply_target": app.apply_target,
+        "ats_platform": app.ats_platform, "resume_id": app.resume_id, "resume_path": app.resume_path,
+        "attempts": app.attempts, "last_step": app.last_step, "submit_attempted": app.submit_attempted,
+        "confirmed": app.confirmed, "confirmation_text": app.confirmation_text,
+        "failure_reason": app.failure_reason, "manual_action_reason": app.manual_action_reason,
+        "review_decision": app.review_decision, "final_url": app.final_url,
+        "started_at": iso(app.started_at), "finished_at": iso(app.finished_at), "applied_at": iso(app.applied_at),
+        "answers": [qa_dict(q) for q in app.answers],
+    }
+
+
+def job_detail(job: Job) -> dict[str, Any]:
+    d = job_summary(job)
+    d.update({
+        "external_id": job.external_id,
+        "experience_text": job.experience_text,
+        "salary_text": job.salary_text,
+        "posted_text": job.posted_text,
+        "description": job.description,
+        "skills": job.skills or [],
+        "external_url": job.external_url,
+        "search_query": job.search_query,
+        "match_details": job.match_details or {},
+        "evaluated_at": iso(job.evaluated_at),
+        "application": application_dict(job.application),
+        "events": [event_dict(e) for e in job.events],
+    })
+    return d
+
+
+def agent_dict(st: AgentState, alive: bool) -> dict[str, Any]:
+    return {
+        "desired_state": st.desired_state, "actual_state": st.actual_state if alive or st.actual_state in
+        {"STOPPED", "IDLE", "ERROR"} else "STOPPED", "alive": alive, "mode": st.mode, "portals": st.portals or [],
+        "pid": st.pid, "heartbeat_at": iso(st.heartbeat_at), "started_at": iso(st.started_at), "run_id": st.run_id,
+        "current_activity": st.current_activity, "message": st.message, "last_error": st.last_error,
+        "pending_job_id": st.pending_job_id, "gate_kind": st.gate_kind if alive else None,
+        "gate_reason": st.gate_reason if alive else "", "gate_opened_at": iso(st.gate_opened_at),
+        "repeat_minutes": st.repeat_minutes,
+    }
+
+
+def memory_dict(m: AnswerMemory) -> dict[str, Any]:
+    return {"id": m.id, "question": m.question, "answer": m.answer, "times_used": m.times_used,
+            "updated_at": iso(m.updated_at)}

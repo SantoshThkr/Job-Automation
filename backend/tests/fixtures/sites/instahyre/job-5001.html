@@ -1,0 +1,14 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Frontend Developer at Nova Payments | Instahyre (mock)</title></head><body>
+<nav><a href="/instahyre/candidate/profile/" class="candidate-name">Asha</a></nav>
+<h1 class="job-title">Frontend Developer</h1><h2 class="company-name">Nova Payments</h2>
+<div class="job-locations">Bangalore</div><div class="job-experience">4 - 8 years</div>
+<div class="job-skills"><span class="skill">React</span><span class="skill">TypeScript</span></div>
+<div class="job-description"><p>We are hiring a frontend engineer.</p><p><b>Requirements:</b></p><ul><li>5+ years of experience with React, TypeScript, JavaScript</li><li>HTML, CSS, Redux, Jest</li></ul></div>
+<button class="apply-btn" id="interested-btn" onclick="document.getElementById('m').classList.add('in'); document.getElementById('m').style.display='block'">Apply</button>
+<div class="modal apply-modal" id="m" role="dialog" style="display:none"><h4>Apply to Nova Payments</h4>
+ <div class="form-group"><label for="ectc">Expected CTC (in lakhs) *</label><input id="ectc" required></div>
+ <div class="form-group"><label for="msg">Message to the recruiter</label><textarea id="msg"></textarea></div>
+ <div class="error-message" id="err" style="display:none">Expected CTC is required</div>
+ <button id="apply-confirm" onclick="if(!document.getElementById('ectc').value){document.getElementById('err').style.display='block';return;} window.ECTC=document.getElementById('ectc').value; document.getElementById('m').style.display='none'; document.getElementById('ok').hidden=false;">Apply</button></div>
+<div class="toast-success" id="ok" hidden>You have successfully applied to Frontend Developer</div>
+</body></html>

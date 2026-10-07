@@ -1,0 +1,97 @@
+{
+  "profile_confirmed": true,
+  "personal": {
+    "first_name": "Asha",
+    "last_name": "Verma",
+    "email": "asha.verma.dev@gmail.com",
+    "phone": "+919812345678",
+    "phone_country_code": "+91",
+    "current_city": "Bengaluru",
+    "state": "Karnataka",
+    "country": "India",
+    "postal_code": "560102",
+    "address": "HSR Layout, Bengaluru",
+    "linkedin_url": "https://www.linkedin.com/in/asha-verma-dev",
+    "github_url": "https://github.com/ashaverma",
+    "portfolio_url": "https://ashaverma.dev"
+  },
+  "professional": {
+    "current_title": "Senior Frontend Engineer",
+    "current_company": "Acme Fintech",
+    "total_experience_years": 7,
+    "relevant_experience_years": 7,
+    "notice_period_days": 30,
+    "serving_notice": false,
+    "current_ctc_lpa": 28,
+    "expected_ctc_lpa": 38,
+    "salary_negotiable": true,
+    "summary": "Frontend engineer with 7 years of experience building React and TypeScript web applications, design systems and performance-focused user interfaces.",
+    "highlights": [
+      "Built and maintained a React component library used by 6 product teams",
+      "Improved Largest Contentful Paint by 40% on the checkout flow"
+    ],
+    "work_history": [
+      {"company": "Acme Fintech", "title": "Senior Frontend Engineer", "start": "2021-04", "end": "present",
+       "summary": "Leads the web checkout and design system", "technologies": ["React", "TypeScript", "Next.js"]},
+      {"company": "Pixel Labs", "title": "Frontend Developer", "start": "2017-07", "end": "2021-03",
+       "summary": "Built SPAs in React and Redux", "technologies": ["React", "Redux", "JavaScript"]}
+    ],
+    "education": [
+      {"degree": "B.Tech", "field": "Computer Science", "institution": "VTU", "start_year": 2013, "end_year": 2017, "grade": "8.1 CGPA"}
+    ],
+    "certifications": [],
+    "languages": ["English", "Hindi"]
+  },
+  "skills": {
+    "primary": ["JavaScript", "TypeScript", "React", "Next.js", "HTML", "CSS", "Redux"],
+    "secondary": ["Node.js", "Jest", "React Testing Library", "Webpack", "Vite", "Tailwind CSS", "GraphQL", "REST APIs", "Git", "Responsive Design", "Web Performance", "Accessibility"],
+    "years": {"JavaScript": 7, "TypeScript": 4, "React": 6, "Next.js": 3, "Node.js": 2, "Redux": null}
+  },
+  "work_preferences": {
+    "preferred_locations": ["Bengaluru", "Remote"],
+    "open_to_remote": true,
+    "open_to_hybrid": true,
+    "open_to_onsite": true,
+    "willing_to_relocate": false,
+    "requires_sponsorship": false,
+    "authorized_countries": ["India"]
+  },
+  "job_preferences": {
+    "target_titles": ["Frontend Developer", "Frontend Engineer", "Front End Developer", "React Developer", "React JS Developer", "UI Developer", "UI Engineer", "Senior Frontend Engineer", "Lead Frontend Engineer", "JavaScript Developer"],
+    "acceptable_titles": ["Full Stack Developer", "Software Engineer", "Software Development Engineer", "Web Developer", "Next.js Developer", "SDE 2", "SDE 3"],
+    "excluded_title_keywords": ["intern", "internship", "trainee", "fresher", "java developer", ".net", "php", "android", "ios developer", "flutter", "data scientist", "data engineer", "machine learning", "devops", "sre", "qa engineer", "sdet", "salesforce", "director", "head of"],
+    "excluded_companies": ["Blocked Corp"],
+    "excluded_jd_keywords": ["commission only"],
+    "min_frontend_ratio": 0.5,
+    "accept_fullstack": true,
+    "min_salary_lpa": null
+  },
+  "search": {
+    "queries": ["React Developer", "Frontend Developer"],
+    "locations": ["Bengaluru"],
+    "portals": ["naukri", "linkedin", "instahyre"],
+    "max_pages_per_query": 2,
+    "max_jobs_per_query": 20,
+    "max_applications_per_run": 10,
+    "max_applications_per_day": 30,
+    "posted_within_days": 7,
+    "linkedin_easy_apply_only": false,
+    "delay_between_applications_s": [0, 0]
+  },
+  "matching": {
+    "apply_threshold": 70,
+    "skip_threshold": 45,
+    "use_ai": false,
+    "ai_for_ambiguous_only": true,
+    "experience_tolerance_years": 2,
+    "location_strict": true
+  },
+  "resumes": [
+    {"id": "frontend", "path": "WILL_BE_REPLACED", "label": "Frontend resume", "tags": ["frontend", "react"], "default": true},
+    {"id": "fullstack", "path": "WILL_BE_REPLACED", "label": "Full-stack resume", "tags": ["fullstack", "node"], "default": false}
+  ],
+  "custom_answers": [
+    {"pattern": "preferred pronoun", "answer": "she/her"}
+  ],
+  "diversity": {"gender": "Female", "pronouns": "", "veteran_status": "", "disability_status": "", "ethnicity": ""}
+}

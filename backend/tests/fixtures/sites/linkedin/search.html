@@ -1,0 +1,23 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Jobs | LinkedIn (mock)</title>
+<style>.jobs-search-results-list{height:400px;overflow:auto} li{height:120px;border-bottom:1px solid #ddd}</style></head><body>
+<nav class="global-nav"><div class="global-nav__me"></div></nav>
+<div class="scaffold-layout__list"><div class="jobs-search-results-list"><ul id="list"></ul></div></div>
+<script>
+const jobs = [
+ [3001, 'Senior Frontend Engineer', 'Acme Cloud', 'Bengaluru, Karnataka, India (Hybrid)', 'Easy Apply'],
+ [3002, 'React Developer', 'Beta Analytics', 'India (Remote)', 'Promoted'],
+ [3003, 'Frontend Engineer', 'Kappa Systems', 'Bengaluru, Karnataka, India', 'Applied'],
+ [3004, 'Backend Engineer (Go)', 'Lambda Pay', 'Bengaluru, Karnataka, India', 'Easy Apply'],
+ [3005, 'UI Engineer', 'Mu Studio', 'Bengaluru, Karnataka, India', 'Easy Apply'],
+ [3006, 'Senior React Developer', 'Acme Fintech Solutions', 'Bengaluru, Karnataka, India', 'Easy Apply'],
+];
+const start = Number(new URLSearchParams(location.search).get('start') || 0);
+const list = document.getElementById('list');
+if (start === 0) jobs.forEach(([id, title, company, loc, footer]) => {
+  const li = document.createElement('li'); li.className = 'scaffold-layout__list-item'; li.setAttribute('data-occludable-job-id', id);
+  li.innerHTML = '<div class="job-card-container" data-job-id="' + id + '"><a class="job-card-list__title--link" href="/linkedin/jobs/view/' + id + '/"><strong>' + title + '</strong></a>'
+    + '<div class="artdeco-entity-lockup__subtitle"><span>' + company + '</span></div><ul class="job-card-container__metadata-wrapper"><li>' + loc + '</li></ul>'
+    + '<ul class="job-card-list__footer-wrapper"><li class="job-card-container__footer-item">' + footer + '</li></ul></div>';
+  list.appendChild(li); });
+else document.body.insertAdjacentHTML('beforeend', '<div class="jobs-search-no-results-banner">No matching jobs found</div>');
+</script></body></html>

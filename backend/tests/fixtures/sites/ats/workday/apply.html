@@ -1,0 +1,44 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Apply - Workday (mock)</title>
+<style>[role=listbox]{position:absolute;background:#fff;border:1px solid #888} [role=option]{padding:4px;cursor:pointer}</style></head><body>
+<div data-automation-id="applyFlowPage">
+ <div class="step" id="s1"><h2>My Information</h2>
+  <div data-automation-id="formField-legalNameSection_firstName"><label for="fn">First Name*</label><input id="fn" data-automation-id="legalNameSection_firstName" required></div>
+  <div data-automation-id="formField-legalNameSection_lastName"><label for="ln">Last Name*</label><input id="ln" data-automation-id="legalNameSection_lastName" required></div>
+  <div data-automation-id="formField-email"><label for="em">Email Address*</label><input id="em" data-automation-id="email" required></div>
+  <div data-automation-id="formField-phone"><label for="ph">Phone Number*</label><input id="ph" data-automation-id="phone-number" required></div>
+  <div data-automation-id="formField-city"><label for="ct">City</label><input id="ct" data-automation-id="addressSection_city"></div>
+  <div data-automation-id="formField-source"><label id="src-l">How Did You Hear About Us?*</label><button type="button" aria-haspopup="listbox" aria-labelledby="src-l" data-opts="LinkedIn|Job Board|Employee Referral">Select One</button></div>
+ </div>
+ <div class="step" id="s2" hidden><h2>My Experience</h2>
+  <div data-automation-id="formField-resume"><label for="rf">Resume/CV</label><input id="rf" type="file" data-automation-id="file-upload-input-ref"></div>
+ </div>
+ <div class="step" id="s3" hidden><h2>Application Questions</h2>
+  <div data-automation-id="formField-q1"><label id="q1l">Are you legally authorized to work in India?*</label><button type="button" aria-haspopup="listbox" aria-labelledby="q1l" data-opts="Yes|No">Select One</button></div>
+  <div data-automation-id="formField-q2"><label for="q2">How many years of experience do you have with React?*</label><input id="q2" type="text" required></div>
+ </div>
+ <div class="step" id="s4" hidden><h2>Review</h2><p>Please review your application.</p></div>
+ <div id="done" hidden data-automation-id="applicationSubmittedMessage"><h2>Application Submitted</h2></div>
+ <div id="err" data-automation-id="errorMessage" hidden></div>
+ <button data-automation-id="bottom-navigation-next-button" id="nav">Save and Continue</button>
+</div>
+<div role="listbox" id="lb" hidden></div>
+<script>
+let step = 1; let active = null;
+document.querySelectorAll('button[aria-haspopup=listbox]').forEach(b => b.addEventListener('click', () => {
+  active = b; const lb = document.getElementById('lb'); lb.innerHTML = '';
+  b.dataset.opts.split('|').forEach(o => { const d = document.createElement('div'); d.setAttribute('role','option'); d.textContent = o;
+    d.onclick = () => { active.textContent = o; lb.hidden = true; }; lb.appendChild(d); });
+  const r = b.getBoundingClientRect(); lb.style.top = (r.bottom + window.scrollY) + 'px'; lb.style.left = r.left + 'px'; lb.hidden = false; }));
+function valid() { const s = document.getElementById('s' + step);
+  for (const i of s.querySelectorAll('input[required]')) if (!i.value.trim()) return false;
+  for (const b of s.querySelectorAll('button[aria-haspopup]')) if (b.textContent === 'Select One') return false;
+  if (step === 2 && !document.getElementById('rf').files.length) return false;
+  return true; }
+document.getElementById('nav').addEventListener('click', () => {
+  const err = document.getElementById('err');
+  if (step === 4) { document.querySelectorAll('.step').forEach(s => s.hidden = true); document.getElementById('done').hidden = false; document.getElementById('nav').hidden = true; return; }
+  if (!valid()) { err.textContent = 'Error: The field is required and must have a value.'; err.hidden = false; return; }
+  err.hidden = true; document.getElementById('s' + step).hidden = true; step++; document.getElementById('s' + step).hidden = false;
+  if (step === 4) document.getElementById('nav').textContent = 'Submit';
+});
+</script></body></html>

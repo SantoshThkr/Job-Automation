@@ -1,0 +1,541 @@
+"""Browser engine: a thin, resilient layer over Playwright used by every portal / ATS adapter.
+
+Features: persistent session (cookies survive restarts, so you log in once), robust multi-strategy
+element lookup, retries on navigation timeouts, infinite-scroll helper, page-change detection,
+pause/resume/stop checkpoints before each action, crash recovery and failure screenshots.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import logging
+import random
+import re
+import time
+from collections.abc import Awaitable, Callable
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from playwright.async_api import (
+    BrowserContext,
+    Error as PlaywrightError,
+    Frame,
+    Locator,
+    Page,
+    Playwright,
+    TimeoutError as PlaywrightTimeout,
+    async_playwright,
+)
+
+from app.browser.errors import BrowserCrashed, ElementNotFound, NavigationFailed
+from app.browser.selectors import Target
+from app.config import Settings, get_settings
+
+log = logging.getLogger(__name__)
+
+Checkpoint = Callable[[], Awaitable[None]]
+Root = Page | Frame | Locator
+
+CAPTCHA_SELECTORS = [
+    "iframe[src*='recaptcha/api2/bframe']",
+    "iframe[src*='recaptcha/enterprise/bframe']",
+    "iframe[src*='hcaptcha.com'][src*='challenge']",
+    "iframe[title*='challenge' i]",
+    "iframe[src*='challenges.cloudflare.com']",
+    "iframe[src*='arkoselabs']",
+    "#captcha",
+    "#captcha-internal",
+    "[data-testid='captcha']",
+    "iframe[title*='reCAPTCHA' i]:not([style*='hidden'])",
+]
+OTP_SELECTORS = [
+    "input[autocomplete='one-time-code']",
+    "input[name*='otp' i]",
+    "input[id*='otp' i]",
+    "input[name*='verification' i][name*='code' i]",
+    "input[name='pin'][maxlength]",
+]
+OTP_TEXT = re.compile(r"enter\s+(?:the\s+)?otp|one[\s-]time\s+password|verification\s+code\s+(?:sent|to)|"
+                      r"we\s+(?:sent|have\s+sent)\s+(?:a|an|the)\s+(?:code|otp)|enter\s+(?:the\s+)?(?:6|4)[\s-]digit", re.I)
+CAPTCHA_TEXT = re.compile(r"verify\s+(?:that\s+)?you\s+are\s+(?:a\s+)?human|i'?m\s+not\s+a\s+robot|"
+                          r"security\s+check|unusual\s+(?:activity|traffic)|are\s+you\s+a\s+robot|"
+                          r"let'?s\s+do\s+a\s+quick\s+security\s+check", re.I)
+
+
+class BrowserEngine:
+    def __init__(self, settings: Settings | None = None, *, headless: bool | None = None,
+                 user_data_dir: Path | None = None, checkpoint: Checkpoint | None = None,
+                 screenshot_dir: Path | None = None, human_delays: bool = True,
+                 persistent: bool = True) -> None:
+        self.settings = settings or get_settings()
+        self.headless = self.settings.browser_headless if headless is None else headless
+        self.user_data_dir = user_data_dir or self.settings.browser_profile_path
+        self.screenshot_dir = screenshot_dir or self.settings.screenshots_path
+        self._checkpoint = checkpoint
+        self.human_delays = human_delays
+        self.persistent = persistent
+        self.nav_timeout = self.settings.nav_timeout_ms
+        self.action_timeout = self.settings.action_timeout_ms
+        self._pw: Playwright | None = None
+        self._browser = None
+        self._context: BrowserContext | None = None
+        self._page: Page | None = None
+        self._context_closed = False
+        self._crashed_pages: set[int] = set()
+        self.restarts = 0
+
+    # ------------------------------------------------------------ lifecycle
+    async def start(self) -> None:
+        if self._context is not None and not self._context_closed:
+            return
+        self.screenshot_dir.mkdir(parents=True, exist_ok=True)
+        if self._pw is None:
+            self._pw = await async_playwright().start()
+        launch_args = ["--disable-blink-features=AutomationControlled", "--no-first-run",
+                       "--no-default-browser-check"]
+        common: dict[str, Any] = {
+            "headless": self.headless,
+            "slow_mo": self.settings.browser_slow_mo_ms or None,
+            "args": launch_args,
+        }
+        if self.settings.browser_channel:
+            common["channel"] = self.settings.browser_channel
+        ctx_opts: dict[str, Any] = {"viewport": {"width": 1366, "height": 900}, "locale": "en-IN",
+                                    "timezone_id": "Asia/Kolkata"}
+        if self.persistent:
+            self.user_data_dir.mkdir(parents=True, exist_ok=True)
+            self._context = await self._pw.chromium.launch_persistent_context(
+                str(self.user_data_dir), **common, **ctx_opts)
+        else:
+            self._browser = await self._pw.chromium.launch(**common)
+            self._context = await self._browser.new_context(**ctx_opts)
+        self._context_closed = False
+        self._context.on("close", lambda _c: self._mark_closed())
+        self._context.set_default_timeout(self.action_timeout)
+        self._context.set_default_navigation_timeout(self.nav_timeout)
+        pages = self._context.pages
+        self._page = pages[0] if pages else await self._context.new_page()
+        self._watch_page(self._page)
+        log.info("Browser started (headless=%s, persistent=%s)", self.headless, self.persistent)
+
+    def _mark_closed(self) -> None:
+        self._context_closed = True
+
+    def _watch_page(self, page: Page) -> None:
+        page.on("crash", lambda p: self._crashed_pages.add(id(p)))
+
+    async def stop(self) -> None:
+        try:
+            if self._context is not None and not self._context_closed:
+                await self._context.close()
+        except Exception as exc:  # pragma: no cover - best effort
+            log.debug("context close: %s", exc)
+        try:
+            if self._browser is not None:
+                await self._browser.close()
+        except Exception:  # pragma: no cover
+            pass
+        try:
+            if self._pw is not None:
+                await self._pw.stop()
+        except Exception:  # pragma: no cover
+            pass
+        self._context = None
+        self._browser = None
+        self._page = None
+        self._pw = None
+        log.info("Browser stopped")
+
+    @property
+    def alive(self) -> bool:
+        if self._context is None or self._context_closed:
+            return False
+        if self._browser is not None and not self._browser.is_connected():
+            return False
+        return True
+
+    async def ensure_alive(self) -> None:
+        """Restart the browser after a crash / manual close; replace crashed pages."""
+        if not self.alive:
+            log.warning("Browser is not running - restarting")
+            self.restarts += 1
+            self._context = None
+            if self._browser is not None:
+                try:
+                    await self._browser.close()
+                except Exception:
+                    pass
+                self._browser = None
+            await self.start()
+            return
+        if self._page is None or self._page.is_closed() or id(self._page) in self._crashed_pages:
+            log.warning("Page closed or crashed - opening a new tab")
+            self._crashed_pages.discard(id(self._page))
+            assert self._context is not None
+            self._page = await self._context.new_page()
+            self._watch_page(self._page)
+
+    @property
+    def page(self) -> Page:
+        if self._page is None:
+            raise BrowserCrashed("Browser not started")
+        return self._page
+
+    @property
+    def context(self) -> BrowserContext:
+        if self._context is None:
+            raise BrowserCrashed("Browser not started")
+        return self._context
+
+    def use_page(self, page: Page) -> None:
+        self._page = page
+        self._watch_page(page)
+
+    async def new_page(self) -> Page:
+        await self.ensure_alive()
+        page = await self.context.new_page()
+        self._watch_page(page)
+        return page
+
+    # ------------------------------------------------------------ control
+    async def checkpoint(self) -> None:
+        if self._checkpoint is not None:
+            await self._checkpoint()
+
+    async def human_delay(self, min_ms: int | None = None, max_ms: int | None = None) -> None:
+        if not self.human_delays:
+            return
+        lo = self.settings.human_delay_ms_min if min_ms is None else min_ms
+        hi = self.settings.human_delay_ms_max if max_ms is None else max_ms
+        if hi > 0:
+            await asyncio.sleep(random.uniform(lo, max(lo, hi)) / 1000)
+
+    # --------------------------------------------------------- navigation
+    async def goto(self, url: str, *, wait_until: str = "domcontentloaded", retries: int = 2,
+                   page: Page | None = None) -> Page:
+        await self.checkpoint()
+        await self.ensure_alive()
+        p = page or self.page
+        last: Exception | None = None
+        for attempt in range(retries + 1):
+            try:
+                await p.goto(url, wait_until=wait_until, timeout=self.nav_timeout)  # type: ignore[arg-type]
+                await self.human_delay()
+                return p
+            except PlaywrightTimeout as exc:
+                last = exc
+                log.warning("Navigation timeout (%d/%d) %s", attempt + 1, retries + 1, url)
+            except PlaywrightError as exc:
+                last = exc
+                msg = str(exc)
+                log.warning("Navigation error (%d/%d) %s: %s", attempt + 1, retries + 1, url, msg.splitlines()[0])
+                if "Target page, context or browser has been closed" in msg or "crash" in msg.lower():
+                    await self.ensure_alive()
+                    p = self.page
+            await asyncio.sleep(min(2 ** attempt, 8))
+        raise NavigationFailed(f"Could not load {url}: {last}")
+
+    async def wait_for_load(self, state: str = "domcontentloaded", timeout: int | None = None,
+                            page: Page | None = None) -> None:
+        try:
+            await (page or self.page).wait_for_load_state(state, timeout=timeout or self.nav_timeout)  # type: ignore[arg-type]
+        except PlaywrightTimeout:
+            log.debug("wait_for_load_state(%s) timed out", state)
+
+    async def page_signature(self, page: Page | None = None) -> str:
+        p = page or self.page
+        try:
+            info = await p.evaluate(
+                "() => [location.href, document.title, (document.body && document.body.innerText || '').length,"
+                " document.querySelectorAll('*').length].join('|')")
+        except PlaywrightError:
+            info = p.url
+        return hashlib.sha1(str(info).encode()).hexdigest()
+
+    async def wait_for_page_change(self, before: str, *, timeout_ms: int = 10_000, page: Page | None = None,
+                                   poll_ms: int = 250) -> bool:
+        """Wait until the URL/DOM signature differs from ``before`` (navigation, SPA route, modal...)."""
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            await self.checkpoint()
+            try:
+                if await self.page_signature(page) != before:
+                    return True
+            except PlaywrightError:
+                return True  # navigated mid-evaluation
+            await asyncio.sleep(poll_ms / 1000)
+        return False
+
+    # ------------------------------------------------------------ finding
+    async def find(self, target: Target, *, root: Root | None = None, timeout_ms: int = 0,
+                   visible: bool = True) -> Locator | None:
+        """Return the first element matched by any strategy (polling up to ``timeout_ms``)."""
+        base = root or self.page
+        deadline = time.monotonic() + timeout_ms / 1000
+        while True:
+            for desc, loc in target.strategies(base):
+                try:
+                    count = await loc.count()
+                except PlaywrightError:
+                    continue
+                for i in range(min(count, 10)):
+                    el = loc.nth(i)
+                    try:
+                        if not visible or await el.is_visible():
+                            return el
+                    except PlaywrightError:
+                        continue
+            if time.monotonic() >= deadline:
+                return None
+            await asyncio.sleep(0.2)
+
+    async def find_all(self, target: Target, *, root: Root | None = None, visible: bool = True) -> list[Locator]:
+        base = root or self.page
+        for _desc, loc in target.strategies(base):
+            try:
+                count = await loc.count()
+            except PlaywrightError:
+                continue
+            if not count:
+                continue
+            items = [loc.nth(i) for i in range(count)]
+            if visible:
+                items = [el for el in items if await _safe_visible(el)]
+            if items:
+                return items
+        return []
+
+    async def exists(self, target: Target, *, root: Root | None = None, timeout_ms: int = 0) -> bool:
+        return await self.find(target, root=root, timeout_ms=timeout_ms) is not None
+
+    async def wait_for(self, target: Target, *, root: Root | None = None, timeout_ms: int | None = None) -> Locator:
+        el = await self.find(target, root=root, timeout_ms=self.action_timeout if timeout_ms is None else timeout_ms)
+        if el is None:
+            raise ElementNotFound(f"Element not found: {target.describe()}")
+        return el
+
+    async def wait_for_any(self, targets: dict[str, Target], *, root: Root | None = None,
+                           timeout_ms: int = 10_000) -> tuple[str | None, Locator | None]:
+        deadline = time.monotonic() + timeout_ms / 1000
+        while True:
+            await self.checkpoint()
+            for key, t in targets.items():
+                el = await self.find(t, root=root)
+                if el is not None:
+                    return key, el
+            if time.monotonic() >= deadline:
+                return None, None
+            await asyncio.sleep(0.3)
+
+    async def text_of(self, target: Target | Locator, *, root: Root | None = None, default: str = "") -> str:
+        el = target if isinstance(target, Locator) else await self.find(target, root=root, visible=False)
+        if el is None:
+            return default
+        try:
+            return (await el.inner_text(timeout=3000)).strip()
+        except PlaywrightError:
+            try:
+                return ((await el.text_content(timeout=2000)) or "").strip()
+            except PlaywrightError:
+                return default
+
+    async def attr_of(self, target: Target | Locator, name: str, *, root: Root | None = None) -> str | None:
+        el = target if isinstance(target, Locator) else await self.find(target, root=root, visible=False)
+        if el is None:
+            return None
+        try:
+            return await el.get_attribute(name, timeout=2000)
+        except PlaywrightError:
+            return None
+
+    # ------------------------------------------------------------ actions
+    async def _resolve(self, target: Target | Locator, root: Root | None, timeout_ms: int | None) -> Locator:
+        if isinstance(target, Locator):
+            return target
+        return await self.wait_for(target, root=root, timeout_ms=timeout_ms)
+
+    async def click(self, target: Target | Locator, *, root: Root | None = None, timeout_ms: int | None = None,
+                    force: bool = False, retries: int = 2) -> None:
+        await self.checkpoint()
+        last: Exception | None = None
+        for attempt in range(retries + 1):
+            try:
+                el = await self._resolve(target, root, timeout_ms)
+                try:
+                    await el.scroll_into_view_if_needed(timeout=3000)
+                except PlaywrightError:
+                    pass
+                await el.click(timeout=timeout_ms or self.action_timeout, force=force)
+                await self.human_delay()
+                return
+            except ElementNotFound:
+                raise
+            except PlaywrightError as exc:
+                last = exc
+                log.debug("click retry %d on %s: %s", attempt + 1, _describe(target), str(exc).splitlines()[0])
+                if attempt == retries - 1:
+                    force = True  # overlays (cookie banners, sticky headers) intercepting clicks
+                await asyncio.sleep(0.5)
+        raise ElementNotFound(f"Could not click {_describe(target)}: {last}")
+
+    async def type(self, target: Target | Locator, text: str, *, root: Root | None = None, clear: bool = True,
+                   delay_ms: int | None = None, timeout_ms: int | None = None) -> None:
+        await self.checkpoint()
+        el = await self._resolve(target, root, timeout_ms)
+        await el.scroll_into_view_if_needed(timeout=3000)
+        if clear:
+            await el.fill("", timeout=timeout_ms or self.action_timeout)
+        delay = delay_ms if delay_ms is not None else (random.randint(20, 60) if self.human_delays else 0)
+        await el.press_sequentially(text, delay=delay, timeout=max(self.action_timeout, len(text) * (delay + 30)))
+        await self.human_delay(80, 300)
+
+    async def fill(self, target: Target | Locator, text: str, *, root: Root | None = None,
+                   timeout_ms: int | None = None) -> None:
+        await self.checkpoint()
+        el = await self._resolve(target, root, timeout_ms)
+        await el.fill(text, timeout=timeout_ms or self.action_timeout)
+        await self.human_delay(50, 200)
+
+    async def select(self, target: Target | Locator, *, label: str | None = None, value: str | None = None,
+                     root: Root | None = None) -> None:
+        await self.checkpoint()
+        el = await self._resolve(target, root, None)
+        if label is not None:
+            await el.select_option(label=label)
+        else:
+            await el.select_option(value=value)
+        await self.human_delay(50, 200)
+
+    async def upload(self, target: Target | Locator, path: str | Path, *, root: Root | None = None) -> None:
+        await self.checkpoint()
+        el = await self._resolve(target, root, None) if not isinstance(target, Locator) else target
+        await el.set_input_files(str(path))
+        await self.human_delay(300, 800)
+
+    async def press(self, key: str, *, page: Page | None = None) -> None:
+        await (page or self.page).keyboard.press(key)
+
+    async def scroll_by(self, dy: int = 800, *, page: Page | None = None) -> None:
+        await self.checkpoint()
+        await (page or self.page).mouse.wheel(0, dy)
+        await asyncio.sleep(0.3)
+
+    async def scroll_to_load_all(self, item_target: Target, *, max_rounds: int = 15, root: Root | None = None,
+                                 container_selector: str | None = None, page: Page | None = None) -> int:
+        """Infinite-scroll helper: scroll until the number of items stops growing."""
+        p = page or self.page
+        stable_rounds, last_count = 0, -1
+        for _ in range(max_rounds):
+            await self.checkpoint()
+            items = await self.find_all(item_target, root=root, visible=False)
+            count = len(items)
+            if count == last_count:
+                stable_rounds += 1
+                if stable_rounds >= 2:
+                    break
+            else:
+                stable_rounds = 0
+            last_count = count
+            if items:
+                try:
+                    await items[-1].scroll_into_view_if_needed(timeout=2000)
+                except PlaywrightError:
+                    pass
+            if container_selector:
+                await p.evaluate("(sel) => { const el = document.querySelector(sel); if (el) el.scrollTop = el.scrollHeight; }",
+                                 container_selector)
+            else:
+                await p.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
+            await asyncio.sleep(0.8 if self.human_delays else 0.3)
+        return max(last_count, 0)
+
+    async def expect_popup(self, action: Callable[[], Awaitable[None]], timeout_ms: int = 8000) -> Page | None:
+        """Run ``action`` (e.g. a click) and return a newly opened tab, if any."""
+        try:
+            async with self.context.expect_page(timeout=timeout_ms) as info:
+                await action()
+            new_page = await info.value
+            self._watch_page(new_page)
+            await self.wait_for_load(page=new_page)
+            return new_page
+        except PlaywrightTimeout:
+            return None
+
+    # ------------------------------------------------------ diagnostics
+    async def screenshot(self, name: str, *, page: Page | None = None, full_page: bool = False) -> str | None:
+        p = page or self._page
+        if p is None or p.is_closed():
+            return None
+        safe = re.sub(r"[^A-Za-z0-9_-]+", "-", name)[:80]
+        path = self.screenshot_dir / f"{datetime.now():%Y%m%d-%H%M%S}-{safe}.png"
+        try:
+            await p.screenshot(path=str(path), full_page=full_page, timeout=10_000)
+            return str(path)
+        except PlaywrightError as exc:
+            log.debug("screenshot failed: %s", exc)
+            return None
+
+    async def capture_failure(self, name: str, *, page: Page | None = None) -> dict[str, str | None]:
+        p = page or self._page
+        shot = await self.screenshot(f"fail-{name}", page=p, full_page=True)
+        html_path = None
+        if p is not None and not p.is_closed():
+            try:
+                html = await p.content()
+                html_file = Path(shot).with_suffix(".html") if shot else (
+                    self.screenshot_dir / f"{datetime.now():%Y%m%d-%H%M%S}-fail-{name}.html")
+                html_file.write_text(html, encoding="utf-8")
+                html_path = str(html_file)
+            except PlaywrightError:
+                pass
+        return {"screenshot": shot, "html": html_path, "url": p.url if p and not p.is_closed() else None}
+
+    async def detect_blockers(self, page: Page | None = None) -> list[str]:
+        """Detect CAPTCHA / OTP challenges that require a human."""
+        p = page or self.page
+        found: list[str] = []
+        for sel in CAPTCHA_SELECTORS:
+            try:
+                loc = p.locator(sel)
+                if await loc.count() and await loc.first.is_visible():
+                    found.append("captcha")
+                    break
+            except PlaywrightError:
+                continue
+        for sel in OTP_SELECTORS:
+            try:
+                loc = p.locator(sel)
+                if await loc.count() and await loc.first.is_visible():
+                    found.append("otp")
+                    break
+            except PlaywrightError:
+                continue
+        try:
+            body = await p.evaluate("() => (document.body && document.body.innerText || '').slice(0, 5000)")
+        except PlaywrightError:
+            body = ""
+        if "captcha" not in found and CAPTCHA_TEXT.search(body or ""):
+            found.append("captcha")
+        if "otp" not in found and OTP_TEXT.search(body or ""):
+            found.append("otp")
+        return found
+
+    async def body_text(self, page: Page | None = None, limit: int = 20_000) -> str:
+        try:
+            return await (page or self.page).evaluate(
+                "(n) => (document.body && document.body.innerText || '').slice(0, n)", limit)
+        except PlaywrightError:
+            return ""
+
+
+async def _safe_visible(el: Locator) -> bool:
+    try:
+        return await el.is_visible()
+    except PlaywrightError:
+        return False
+
+
+def _describe(target: Target | Locator) -> str:
+    return target.describe() if isinstance(target, Target) else str(target)

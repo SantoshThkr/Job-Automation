@@ -1,0 +1,30 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Generic application form</title>
+<style>.vh{position:absolute;opacity:0;width:1px;height:1px} .opt{display:inline-block;padding:4px}</style></head>
+<body>
+<form id="app-form" action="/engine/thanks.html" method="post">
+  <div class="field"><label for="fn">First Name *</label><input id="fn" name="first_name" required></div>
+  <div class="field"><label>Last Name <input name="last_name" required></label></div>
+  <div class="field"><span id="email-lbl">Email</span><input type="email" aria-labelledby="email-lbl" name="email"></div>
+  <div class="field"><div class="question-text">Phone number</div><div><input type="tel" name="phone"></div></div>
+  <div class="field"><label for="exp">How many years of experience do you have with React?</label><input id="exp" type="number" name="react_years"></div>
+  <div class="field"><label for="notice">Notice period</label>
+    <select id="notice" name="notice"><option value="">Select...</option><option value="0">Immediate</option><option value="15">15 days</option><option value="30">30 days</option><option value="60">60 days</option></select></div>
+  <fieldset><legend>Are you willing to relocate?</legend>
+    <label class="opt"><input class="vh" type="radio" name="relocate" value="yes"> Yes</label>
+    <label class="opt"><input class="vh" type="radio" name="relocate" value="no"> No</label></fieldset>
+  <div class="field"><label for="why">Why do you want to join us?</label><textarea id="why" name="why"></textarea></div>
+  <div class="field"><label for="prefilled">City</label><input id="prefilled" name="city" value="Pune"></div>
+  <div class="field"><label for="resume">Resume/CV</label><input id="resume" type="file" name="resume" accept=".pdf"></div>
+  <div class="field"><label><input type="checkbox" name="consent" required> I agree to the privacy policy</label></div>
+  <div class="field"><label for="hidden-field" style="display:none">Hidden</label><input id="hidden-field" style="display:none" name="hidden"></div>
+  <my-widget></my-widget>
+  <button type="submit" id="submit">Submit application</button>
+</form>
+<script>
+customElements.define('my-widget', class extends HTMLElement {
+  constructor() { super(); const r = this.attachShadow({mode: 'open'});
+    r.innerHTML = '<label for="gh">GitHub profile</label><input id="gh" name="github">'; }
+});
+</script>
+</body></html>

@@ -1,0 +1,20 @@
+[project]
+name = "personal-job-assistant"
+version = "1.0.0"
+description = "Local-first personal job search and application assistant"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+markers = [
+  "browser: tests that drive a real (headless) Chromium against local mock sites",
+  "live_ollama: tests that call the local Ollama server (skipped when it is not running)",
+]
+filterwarnings = [
+  "ignore::DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 120
