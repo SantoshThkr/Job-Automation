@@ -19,11 +19,15 @@ def setup_logging(process_name: str = "api") -> None:
     settings.ensure_dirs()
     root = logging.getLogger()
     root.setLevel(settings.log_level.upper())
+    from app.security import RedactingFilter
+
+    redact = RedactingFilter(settings.secret_values)  # on every handler: no credential reaches a log file
 
     if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
                for h in root.handlers):
         console = logging.StreamHandler()
         console.setFormatter(logging.Formatter(FORMAT, "%H:%M:%S"))
+        console.addFilter(redact)
         root.addHandler(console)
 
     file_handler = logging.handlers.RotatingFileHandler(
@@ -31,7 +35,12 @@ def setup_logging(process_name: str = "api") -> None:
         encoding="utf-8",
     )
     file_handler.setFormatter(logging.Formatter(FORMAT))
+    file_handler.addFilter(redact)
     root.addHandler(file_handler)
+    try:  # log files hold questions and answers: your account only
+        (settings.logs_path / f"{process_name}.log").chmod(0o600)
+    except OSError:
+        pass
 
     for noisy in ("httpx", "httpcore", "asyncio", "urllib3", "multipart"):
         logging.getLogger(noisy).setLevel(logging.WARNING)

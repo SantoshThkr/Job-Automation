@@ -10,6 +10,8 @@ from app.config import PROJECT_ROOT, get_settings
 from app.profile import Profile, ProfileStore, ResumeEntry
 
 ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx"}
+# how each allowed type starts: a renamed executable or HTML page is not a resume
+_SIGNATURES = {".pdf": (b"%PDF-",), ".docx": (b"PK\x03\x04",), ".doc": (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",)}
 
 
 @dataclass
@@ -77,12 +79,17 @@ def save_uploaded_resume(store: ProfileStore, filename: str, content: bytes, res
         raise ValueError(f"Unsupported resume type {ext}; use PDF/DOC/DOCX")
     if not content:
         raise ValueError("Empty file")
+    if not content.lstrip(b"\xef\xbb\xbf\r\n\t ")[:8].startswith(_SIGNATURES[ext]):
+        raise ValueError(f"The file does not look like a {ext[1:].upper()} document")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", resume_id):
         raise ValueError("Resume id must be 1-64 letters, digits, '-' or '_'")
     resumes_dir = get_settings().resumes_path
     resumes_dir.mkdir(parents=True, exist_ok=True)
     target = resumes_dir / _safe_filename(filename)
+    if target.resolve().parent != resumes_dir.resolve():
+        raise ValueError("Invalid file name")
     target.write_bytes(content)
+    target.chmod(0o600)
     try:
         rel = str(target.relative_to(PROJECT_ROOT))
     except ValueError:

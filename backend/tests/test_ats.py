@@ -81,12 +81,13 @@ async def test_greenhouse_dry_run_fills_but_does_not_submit(engine, site_server,
     assert "confirmation" not in page.url
 
 
-async def test_greenhouse_required_motivation_without_ai_is_manual(engine, site_server, profile):
+async def test_greenhouse_required_motivation_is_written_from_profile(engine, site_server, profile):
     page = await _open(engine, f"{site_server}/ats/greenhouse/job-why.html")
     ctx = make_ctx(engine, profile, JOB, AgentMode.AUTO)
     res = await apply_external(engine, page, ctx)
-    assert res.outcome == ApplyOutcome.MANUAL_ACTION_REQUIRED
-    assert "Why do you want to work" in res.message and ctx.submits == []
+    assert res.outcome == ApplyOutcome.APPLIED, res.message
+    why = next(a for q, a in ctx.answers_log if "Why do you want to work" in q.question)
+    assert why.mode == "composed" and not why.needs_review and "Gamma Health" in why.value
 
 
 async def test_greenhouse_required_motivation_with_ai(engine, site_server, profile):
@@ -165,7 +166,26 @@ async def test_smartrecruiters_shadow_dom_two_steps(engine, site_server, profile
     assert res.ats == "smartrecruiters"
 
 
-async def test_unknown_ats_is_manual_never_applied(engine, site_server, profile):
+async def test_unknown_site_is_handled_by_the_navigator(engine, site_server, profile):
+    page = await _open(engine, f"{site_server}/ats/unknown/apply.html")
+    ctx = make_ctx(engine, profile, JOB, AgentMode.AUTO)
+    res = await apply_external(engine, page, ctx)
+    assert res.outcome == ApplyOutcome.APPLIED, res.message
+    assert res.ats.startswith("site:") and len(ctx.submits) == 1 and res.confirmation_text
+
+
+async def test_unknown_site_dry_run_never_submits(engine, site_server, profile):
+    page = await _open(engine, f"{site_server}/ats/unknown/apply.html")
+    ctx = make_ctx(engine, profile, JOB, AgentMode.DRY_RUN)
+    res = await apply_external(engine, page, ctx)
+    assert res.outcome == ApplyOutcome.DRY_RUN and ctx.submits == []
+    assert await page.locator("input[name='n']").input_value() == "Asha Verma"
+
+
+async def test_unknown_ats_without_navigator_is_manual(engine, site_server, profile, monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "navigator_enabled", False)
     page = await _open(engine, f"{site_server}/ats/unknown/apply.html")
     ctx = make_ctx(engine, profile, JOB, AgentMode.AUTO)
     res = await apply_external(engine, page, ctx)
@@ -178,7 +198,7 @@ async def test_unexpected_navigation_after_submit_is_not_applied(engine, site_se
     ctx = make_ctx(engine, profile, JOB, AgentMode.AUTO)
     res = await apply_external(engine, page, ctx)
     assert res.outcome == ApplyOutcome.MANUAL_ACTION_REQUIRED
-    assert res.submit_attempted and "no confirmation" in res.message.lower()
+    assert res.submit_attempted and "confirmation not verified" in res.message.lower()
 
 
 async def test_otp_after_submit_requires_human(engine, site_server, profile):

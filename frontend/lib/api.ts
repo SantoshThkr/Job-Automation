@@ -13,6 +13,9 @@ export interface Stats {
   dry_run: number;
   already_applied: number;
   queued: number;
+  expired: number;
+  review_pending: number;
+  needs_you: number;
   today_applications: number;
   weekly_applications: number;
   by_status: Record<string, number>;
@@ -36,7 +39,49 @@ export interface AgentState {
   gate_kind: string | null;
   gate_reason: string;
   gate_opened_at: string | null;
+  gate_payload: GatePayload;
   repeat_minutes: number;
+  phase: string;
+  current_step: string;
+  current_url: string;
+  current_job: CurrentJob | null;
+}
+
+export interface CurrentJob {
+  id: number;
+  title: string;
+  company: string;
+  portal: Portal;
+  url: string;
+  status: string;
+  match_score: number | null;
+}
+
+export interface GateQuestion {
+  id: string;
+  question: string;
+  type: string;
+  options: string[];
+  required: boolean;
+  suggested?: string;
+  note?: string;
+}
+
+export interface GatePayload {
+  questions?: GateQuestion[];
+  url?: string;
+  job?: string;
+}
+
+export interface RunItem {
+  id: number;
+  mode: Mode;
+  portals: Portal[];
+  status: string;
+  stats: Record<string, number>;
+  error: string;
+  started_at: string | null;
+  finished_at: string | null;
 }
 
 export interface JobSummary {
@@ -70,6 +115,10 @@ export interface QA {
   source: string;
   needs_review: boolean;
   note: string;
+  category?: string;
+  mode?: string;
+  sources?: string[];
+  verified?: boolean | null;
   job_id?: number;
   job_title?: string;
   job_company?: string;
@@ -105,6 +154,8 @@ export interface Application {
   manual_action_reason: string;
   review_decision: string | null;
   final_url: string;
+  resume_url: string;
+  steps: number;
   started_at: string | null;
   finished_at: string | null;
   applied_at: string | null;
@@ -168,12 +219,67 @@ export interface Resume {
   default: boolean;
 }
 
+export interface NeedsYouQuestion {
+  id: number;
+  question: string;
+  field_type: string;
+  options: string[];
+  required: boolean;
+  why: string;
+  category: string;
+  profile_can_answer: boolean;
+  missing: string;
+  saved_answer: string | null;
+  saved_scope: string | null;
+  suggestion: string | null;
+  suggestion_note: string;
+  sensitive: boolean;
+}
+
+export interface NeedsYouItem {
+  job_id: number;
+  company: string;
+  title: string;
+  portal: string;
+  url: string;
+  ats: string;
+  status: string;
+  step: string;
+  problem: string;
+  stop_kind: string;
+  why: string;
+  live: boolean;
+  resume: "live" | "continue_url" | "verify_first" | "restart";
+  resume_note: string;
+  submit_attempted: boolean;
+  verification: string;
+  evidence: string[];
+  final_url: string;
+  updated_at: string | null;
+  questions: NeedsYouQuestion[];
+  unanswered: number;
+}
+
+export interface NeedsYouResponse {
+  items: NeedsYouItem[];
+  total: number;
+  parked: number;
+  by_kind: Record<string, number>;
+}
+
+export type AnswerScope = "auto" | "global" | "portal" | "company" | "job";
+
 export interface MemoryItem {
   id: number;
   question: string;
   answer: string;
   times_used: number;
   updated_at: string;
+  scope?: string;
+  company?: string;
+  portal?: string;
+  job?: string;
+  category?: string;
 }
 
 export interface AIStatus {
@@ -221,8 +327,9 @@ export const api = {
   resume: () => post<AgentState>("/api/agent/resume"),
   stop: () => post<AgentState>("/api/agent/stop"),
   setMode: (mode: Mode) => request<AgentState>("/api/agent/mode", { method: "PUT", body: JSON.stringify({ mode }) }),
-  gate: (response: "approve" | "reject", job_id?: number | null) =>
-    post<AgentState>("/api/agent/gate", { response, job_id: job_id ?? null }),
+  gate: (response: "approve" | "reject", job_id?: number | null, answers?: Record<string, string>) =>
+    post<AgentState>("/api/agent/gate", { response, job_id: job_id ?? null, answers: answers ?? null }),
+  runs: (limit = 10) => request<RunItem[]>(`/api/agent/runs?limit=${limit}`),
   jobs: (params: Record<string, string | number | boolean | undefined>) => {
     const q = new URLSearchParams();
     Object.entries(params).forEach(([k, v]) => {
@@ -236,8 +343,16 @@ export const api = {
   reevaluate: (id: number, useAi: boolean) => post<JobDetail>(`/api/jobs/${id}/reevaluate?use_ai=${useAi}`),
   events: (limit = 40) => request<EventItem[]>(`/api/events?limit=${limit}`),
   pendingQuestions: () => request<QA[]>("/api/questions/pending"),
-  saveAnswer: (question: string, answer: string) => post<MemoryItem>("/api/answers/memory", { question, answer }),
+  needsYou: (includeParked = false) =>
+    request<NeedsYouResponse>(`/api/needs-you${includeParked ? "?include_parked=true" : ""}`),
+  answerNeedsYou: (jobId: number, answers: { question: string; answer: string; scope: AnswerScope }[]) =>
+    request<{ live: boolean; requeued: boolean; resume: string; resume_note: string; status: string }>(
+      `/api/needs-you/${jobId}/answers`, { method: "POST", body: JSON.stringify({ answers }) }),
+  saveAnswer: (question: string, answer: string, job_id?: number | null) =>
+    post<MemoryItem & { requeued_jobs?: number[] }>("/api/answers/memory", { question, answer, job_id: job_id ?? null }),
   memory: () => request<MemoryItem[]>("/api/answers/memory"),
+  updateMemory: (id: number, answer: string) =>
+    request<MemoryItem & { requeued_jobs?: number[] }>(`/api/answers/memory/${id}`, { method: "PUT", body: JSON.stringify({ answer }) }),
   deleteMemory: (id: number) => request<{ ok: boolean }>(`/api/answers/memory/${id}`, { method: "DELETE" }),
   profile: () => request<ProfileResponse>("/api/profile"),
   updateSettings: (body: Record<string, unknown>) =>

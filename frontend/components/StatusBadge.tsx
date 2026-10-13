@@ -10,6 +10,8 @@ const TONE: Record<string, string> = {
   REVIEW_PENDING: "warn",
   MANUAL_ACTION_REQUIRED: "warn",
   FAILED: "err",
+  EXPIRED: "",
+  PARKED: "",
 };
 
 export function StatusBadge({ status }: { status: string }) {

@@ -13,16 +13,26 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import AsyncIterator
-from urllib.parse import urlencode, urljoin
+from urllib.parse import urlencode, urljoin, urlparse
 
 from playwright.async_api import Error as PlaywrightError, Locator, Page
 
-from app.answers.question_bank import QuestionContext
+from app.answers.intent import Category, classify
+from app.answers.options import choose_option, split_choices
+from app.answers.question_bank import Answer, QuestionContext
 from app.browser.errors import ManualActionRequired
 from app.browser.selectors import T
 from app.engine.context import ApplyContext, GateResult, SubmitDecision
+from app.engine.submission import SubmissionWatcher, confirmation_since, page_state
 from app.portals.base import PortalAdapter, SearchQuery
-from app.portals.common import EXPIRED_TEXT, extract_cards, first_text, all_texts, page_has_success, slugify
+from app.portals.common import (
+    EXPIRED_TEXT,
+    all_texts,
+    extract_cards,
+    first_text,
+    generic_apply_button,
+    slugify,
+)
 from app.portals.types import ApplyOutcome, ApplyResult, JobPosting
 
 log = logging.getLogger(__name__)
@@ -87,6 +97,17 @@ CHAT_CHIPS = ["div.chatbot_Chip", "[class*='chatbot_Chip']", "[class*='chip-cont
 CHAT_SEND = T("chat save", css=["div.sendMsg", "div.send", "[class*='sendMsg']", "[class*='chatbot'] button[type='submit']"],
               text=["Save", "Send", "Submit"])
 
+
+
+# text Naukri shows (or answers with) when it does not take an application
+_REFUSAL_TEXT = re.compile(r"limit|quota|exhaust|exceed|maximum|too\s+many|try\s+again|unable|cannot|can.?t\b|could\s+not|"
+                           r"\berror\b|failed|not\s+allowed|your\s+profile|verify|blocked|restricted|suspicious|"
+                           r"no\s+longer|expired|something\s+went\s+wrong", re.I)
+# ...because of a quota / rate limit: the job is fine, the portal is not taking more applications for now
+_LIMIT_TEXT = re.compile(r"(?:daily|apply|application)\s+limit|limit\s+(?:is\s+|has\s+been\s+)?(?:reached|exceeded|exhausted|over)|"
+                         r"\bquota\b|exhausted|exceeded\s+(?:the|your)|maximum\s+(?:number\s+of\s+)?(?:job\s+)?appl|"
+                         r"too\s+many\s+(?:requests|applications|attempts)|try\s+(?:again\s+)?(?:after\s+some\s+time|"
+                         r"later|tomorrow|after\s+\d+)", re.I)
 
 class NaukriAdapter(PortalAdapter):
     name = "naukri"
@@ -178,6 +199,10 @@ class NaukriAdapter(PortalAdapter):
         page = self.engine.page
         await self.engine.wait_for_any({"jd": T(css=DETAIL_JD), "title": T(css=DETAIL_TITLE[:2]), "expired": EXPIRED},
                                        timeout_ms=15_000)
+        if await self._expired_redirect(page, job):
+            job.extra["expired"] = True
+            job.details_loaded = True
+            return job  # Naukri showed search results instead: keep the listing's own title/company
         job.title = await first_text(page, DETAIL_TITLE) or job.title
         job.company = (await first_text(page, DETAIL_COMPANY)).split("\n")[0] or job.company
         job.experience_text = await first_text(page, DETAIL_EXP) or job.experience_text
@@ -203,6 +228,14 @@ class NaukriAdapter(PortalAdapter):
         job.details_loaded = True
         return job
 
+    async def _expired_redirect(self, page: Page, job: JobPosting) -> bool:
+        """Expired Naukri jobs redirect to search results with a 'Job you are looking for is expired' banner."""
+        body = await self.engine.body_text(page, limit=3000)
+        if not EXPIRED_TEXT.search(body):
+            return False
+        on_job_page = bool(_id_from_url(page.url)) and job.external_id in page.url
+        return not on_job_page or not await first_text(page, DETAIL_JD)
+
     # ------------------------------------------------------------- apply
     async def apply(self, job: JobPosting, ctx: ApplyContext) -> ApplyResult:
         page = self.engine.page
@@ -214,8 +247,13 @@ class NaukriAdapter(PortalAdapter):
             timeout_ms=10_000)
         if key == "applied":
             return ApplyResult(ApplyOutcome.ALREADY_APPLIED, "Naukri shows this job as already applied")
-        if key == "expired" or job.extra.get("expired"):
-            return ApplyResult(ApplyOutcome.FAILED, "Job is no longer accepting applications")
+        if key == "expired" or job.extra.get("expired") or await self._expired_redirect(page, job):
+            return ApplyResult(ApplyOutcome.EXPIRED, "Job is no longer accepting applications")
+        if key is None:
+            found = await generic_apply_button(page)  # markup changed: find the button by what it says
+            if found is not None:
+                key, button = found
+                await ctx.event("generic_button", f"Found the Naukri {key} button by its text")
         if key == "external":
             await ctx.event("external", "Naukri redirects to the company website")
             assert button is not None
@@ -247,19 +285,36 @@ class NaukriAdapter(PortalAdapter):
             return ApplyResult(ApplyOutcome.APPLIED if text else ApplyOutcome.MANUAL_ACTION_REQUIRED,
                                "Submitted by you in the browser", confirmation_text=text, submit_attempted=True)
 
+        await self.engine.wait_for_load("load", timeout=10_000, page=page)  # a click before the page is interactive is lost
+        self._before = await page_state(page)  # what the page already said (job description...) never confirms
         await ctx.mark_submit_attempt()
-        await self.engine.click(button)
-        return await self._post_apply(page, job, ctx)
+        # what Naukri answers to the click: its apply request, and any text it shows (also a toast that is gone again)
+        self._apply_watch = SubmissionWatcher(page)
+        await self._apply_watch.begin()
+        await self._record_new_text(page)
+        try:
+            await self.engine.click(button)
+            res = await self._post_apply(page, job, ctx)
+        finally:
+            self._apply_watch.stop()
+        if res.outcome == ApplyOutcome.APPLIED:
+            res.verification, res.evidence = "confirmed", [f"portal_confirmation: {res.confirmation_text[:160]}"]
+        elif res.submit_attempted and res.outcome == ApplyOutcome.MANUAL_ACTION_REQUIRED and \
+                "not verified" in res.message:
+            res.verification = "uncertain"
+        return res
 
     async def _detect_success(self, page: Page) -> str:
         if await self.engine.exists(SUCCESS, root=page):
             return await self.engine.text_of(SUCCESS, root=page) or "Applied"
         if await self.engine.exists(ALREADY_APPLIED, root=page) and not await self.engine.exists(APPLY_BTN, root=page):
             return "Apply button changed to 'Applied'"
-        return await page_has_success(page)
+        before = getattr(self, "_before", None)
+        return await confirmation_since(page, before) if before is not None else ""
 
     async def _post_apply(self, page: Page, job: JobPosting, ctx: ApplyContext) -> ApplyResult:
         answered = 0
+        reclicked = False
         for _ in range(25):
             key, _el = await self.engine.wait_for_any(
                 {"success": SUCCESS, "chatbot": CHATBOT, "login": LOGGED_OUT}, timeout_ms=10_000)
@@ -280,61 +335,267 @@ class NaukriAdapter(PortalAdapter):
             if key == "chatbot":
                 try:
                     progressed = await self._answer_chatbot_question(page, ctx)
+                except ChatFinished as done:
+                    await ctx.event("chatbot", f"Screening chat finished: '{done}'")
+                    break
                 except ManualActionRequired as exc:
-                    return ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED, exc.reason, submit_attempted=True)
+                    # The screening chat stopped on a question. Naukri registers the application only when the chat
+                    # is completed: when the reloaded job still offers "Apply", nothing was sent - and the job can be
+                    # applied to again by itself once the answer is known (your profile, a saved answer).
+                    unsent = False
+                    if ctx.mode.value != "dry_run":
+                        try:
+                            await self.engine.goto(job.url)
+                            state, _ = await self.engine.wait_for_any({"applied": ALREADY_APPLIED, "apply": APPLY_BTN},
+                                                                      timeout_ms=8000)
+                            unsent = state == "apply"
+                        except Exception as reload_exc:  # noqa: BLE001 - could not check: keep the cautious record
+                            log.debug("could not reload the job after the chat stopped: %s", reload_exc)
+                    return ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED, exc.reason, submit_attempted=not unsent,
+                                       nothing_sent=unsent,
+                                       evidence=["after reloading, Naukri still offers 'Apply': nothing was sent"] if unsent else [])
                 if progressed:
                     answered += 1
                     continue
+            if key is None and not answered and not reclicked:
+                again = await self._unchanged_apply_button(page)
+                if again is not None:  # nothing at all happened: the click was lost, not refused
+                    reclicked = True
+                    await ctx.event("apply_retry", "Naukri did not react to the Apply click - clicking it again")
+                    await self.engine.click(again)
+                    continue
             if key is None:
                 break
+        confirmed = await self._confirm_applied(page, job)
+        if confirmed:
+            return ApplyResult(ApplyOutcome.APPLIED, f"Applied on Naukri ({answered} question(s) answered)",
+                               confirmation_text=confirmed, submit_attempted=True)
         shot = await self.engine.screenshot(f"naukri-unconfirmed-{job.external_id}")
+        if self._still_unapplied and not answered:
+            said, evidence, limit = self._apply_refusal
+            await ctx.event("apply_not_registered", "Naukri did not register the application"
+                            + (f": {said}" if said else " and gave no reason"), evidence=evidence)
+            if limit:
+                return ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED,
+                                   f"Naukri is not accepting more applications right now ({said}) - nothing was sent",
+                                   submit_attempted=False, screenshot=shot, evidence=evidence, portal_limit=said,
+                                   nothing_sent=True, click_ignored=True)
+            return ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED,
+                               "Naukri did not register the Apply click (after reloading, the job still shows 'Apply') - "
+                               "nothing was sent" + (f". Naukri said: {said}" if said else "") + "; Retry applies again",
+                               submit_attempted=False, screenshot=shot, evidence=evidence, nothing_sent=True,
+                               click_ignored=True)
         return ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED,
-                           "Clicked Apply but no confirmation was detected - please verify on Naukri",
-                           submit_attempted=True, screenshot=shot)
+                           "Submitted - confirmation not verified: clicked Apply, but Naukri showed neither its success "
+                           "message nor 'Applied' (also after reloading the job)", submit_attempted=True, screenshot=shot,
+                           verification="uncertain", evidence=["apply_clicked", "no portal confirmation after reload"])
+
+    async def _unchanged_apply_button(self, page: Page):
+        if await self.engine.exists(ALREADY_APPLIED, root=page) or await self.engine.exists(CHATBOT, root=page):
+            return None
+        btn = await self.engine.find(APPLY_BTN, root=page)
+        if btn is None:
+            return None
+        try:
+            label = (await btn.inner_text()).strip().lower()
+            enabled = await btn.is_enabled()
+        except PlaywrightError:
+            return None
+        return btn if enabled and label in {"apply", "apply now"} else None
+
+    _NEW_TEXT_JS = r"""
+    () => {
+      if (window.__pjaNewText) return;
+      window.__pjaNewText = [];
+      const keep = (t) => { t = (t || '').replace(/\s+/g, ' ').trim();
+        if (t.length >= 8 && t.length <= 240 && !window.__pjaNewText.includes(t) && window.__pjaNewText.length < 40) window.__pjaNewText.push(t); };
+      new MutationObserver((records) => { for (const r of records) {
+        for (const n of r.addedNodes) { if (n.nodeType === 1 && !/^(SCRIPT|STYLE|LINK|IFRAME|IMG|SVG|PATH)$/i.test(n.tagName)) keep(n.innerText); }
+        if (r.type === 'characterData' && r.target.parentElement) keep(r.target.parentElement.innerText);
+      } }).observe(document.body, { childList: true, subtree: true, characterData: true });
+    }
+    """
+
+    async def _record_new_text(self, page: Page) -> None:
+        try:
+            await page.evaluate(self._NEW_TEXT_JS)
+        except PlaywrightError:
+            pass
+
+    async def _read_apply_refusal(self, page: Page) -> tuple[str, list[str], bool]:
+        """(what Naukri said, evidence, is it a quota / rate limit?) for an Apply click that changed nothing."""
+        watch = getattr(self, "_apply_watch", None)
+        evidence: list[str] = []
+        said = ""
+        limit = False
+        hits = list(watch.network) if watch is not None else []
+        for h in hits:
+            where = urlparse(h.url).path.rstrip("/").rsplit("/", 2)[-1][:40] or urlparse(h.url).netloc
+            evidence.append(f"request: {h.method} …/{where} -> {h.status}" + (f" \"{h.message[:120]}\"" if h.message else ""))
+            if (h.status >= 400 or h.failure) and h.message and not said:
+                said = h.message
+            limit = limit or h.status == 429
+        try:
+            texts = await page.evaluate("() => window.__pjaNewText || []")
+        except PlaywrightError:
+            texts = []
+        shown = [t for t in texts if _REFUSAL_TEXT.search(t)]
+        for t in shown[:3]:
+            evidence.append(f"shown: {t[:160]}")
+        said = said or (shown[0] if shown else "")
+        if not hits and not texts:
+            evidence.append("no request was sent and nothing appeared on the page")
+        limit = limit or bool(_LIMIT_TEXT.search(" ".join([said, *shown])))
+        return said[:200], evidence[:8], limit
+
+    async def _confirm_applied(self, page: Page, job: JobPosting) -> str:
+        """No success banner seen: wait a little, then reload the job - Naukri shows 'Applied' once it went through."""
+        self._still_unapplied = False
+        self._apply_refusal: tuple[str, list[str], bool] = ("", [], False)
+        for _ in range(10):
+            text = await self._detect_success(page)
+            if text:
+                return text
+            await page.wait_for_timeout(500)
+        self._apply_refusal = await self._read_apply_refusal(page)  # before the reload wipes the page
+        try:
+            await self.engine.goto(job.url)
+            key, _ = await self.engine.wait_for_any({"applied": ALREADY_APPLIED, "apply": APPLY_BTN}, timeout_ms=8000)
+        except Exception as exc:  # navigation problems: leave it for you to verify
+            log.debug("could not reload the job to confirm: %s", exc)
+            return ""
+        self._still_unapplied = key == "apply"
+        return "Naukri now shows this job as Applied" if key == "applied" else ""
 
     async def _answer_chatbot_question(self, page: Page, ctx: ApplyContext) -> bool:
         messages = await all_texts(page, BOT_MESSAGES)
         if not messages:
             return False
         question = messages[-1]
-        options = await self._chat_options(page)
-        field_type = "radio" if options["radio"] else "checkbox_group" if options["checkbox"] else (
-            "select" if options["chips"] else "text")
-        opts = options["radio"] or options["checkbox"] or options["chips"]
-        ans = await ctx.answer(QuestionContext(question=question, field_type=field_type,
-                                               options=[o for o, _ in opts], required=True,
-                                               job=ctx.job.to_job_input(), portal=self.name))
         before = len(messages)
-        if ans.value is None or ans.needs_review:
-            res = await ctx.wait_for_human(
-                "manual", f"Naukri screening question needs your answer: '{question}'"
-                          + (f" (suggested: {ans.value})" if ans.value else ""),
-                page=page, detect_done=lambda: self._chat_advanced(page, before))
-            if res in (GateResult.RESOLVED, GateResult.APPROVE, GateResult.SUBMITTED):
+        if classify(question).category == Category.NOT_A_QUESTION:
+            # a greeting / instruction / thank-you, not a question: wait for what comes next
+            if await self._wait_chat(page, before, 8):
                 return True
-            raise ManualActionRequired(f"Naukri screening question needs your answer: '{question}'", kind="form")
+            raise ChatFinished(question)
+        opts, text_box, send = await self._chat_controls(page, question)
+        field_type = "radio" if opts else "text"
+        if opts and any(kind == "checkbox" for _l, _loc, kind in opts):
+            field_type = "checkbox_group"
+        labels = [label for label, _loc, _k in opts]
+        qctx = QuestionContext(question=question, field_type=field_type, options=labels, required=True,
+                               job=ctx.job.to_job_input(), portal=self.name)
+        ans = await ctx.answer(qctx)
+        if ans.value is None or ans.needs_review:
+            await ctx.log_question(question, ans, filled=False, verified=None)
+            # ask you once in the dashboard (or answer in the chat yourself); your answer is typed in and remembered
+            answers = await ctx.ask_questions(
+                [{"id": "naukri-chatbot", "question": question, "type": field_type, "options": labels,
+                  "required": True, "suggested": ans.value or "", "note": "Naukri screening chatbot"}],
+                page, intro="Naukri screening question", detect_done=lambda: self._chat_advanced(page, before))
+            value = (answers or {}).get("naukri-chatbot", "").strip()
+            if answers is not None and not value:
+                if await self._chat_advanced(page, before):
+                    return True  # you answered directly in the chat
+                raise ManualActionRequired(f"Naukri screening question was not answered: '{question}'", kind="form")
+            if not value:
+                raise ManualActionRequired(f"Naukri screening question needs your answer: '{question}'", kind="form")
+            if opts and field_type != "checkbox_group":
+                value = choose_option(value, labels) or value
+            await ctx.save_user_answer(question, value)
+            ans = Answer(value, 1.0, "user", category=ans.category, mode="user", sources=["you"])
+            if ctx.record_answer is not None:
+                await ctx.record_answer(None, qctx, ans)
 
         if opts:
-            chosen = [v.strip() for v in re.split(r",\s*", ans.value)] if field_type == "checkbox_group" else [ans.value]
-            for label, loc in opts:
-                if label.strip().lower() in {c.lower() for c in chosen}:
-                    await self.engine.click(loc)
+            chosen = (split_choices(ans.value, [label for label, _loc, _kind in opts]) if field_type == "checkbox_group"
+                      else [ans.value])
+            want = {c.lower() for c in chosen}
+            clicked = False
+            for label, loc, _kind in opts:
+                if label.strip().lower() in want:
+                    await self._click_option(loc)
+                    clicked = True
+            if not clicked:
+                raise ManualActionRequired(f"Could not select '{ans.value}' for '{question}'", kind="form")
+        elif text_box is not None:
+            await text_box.click()
+            try:
+                await text_box.fill("")
+            except PlaywrightError:
+                pass
+            await text_box.press_sequentially(ans.value, delay=20)
+            await self._pick_suggestion(page, text_box, ans.value)
         else:
-            box = await self.engine.find(CHAT_TEXT_INPUT, timeout_ms=3000)
-            if box is None:
-                raise ManualActionRequired(f"Could not find the answer box for '{question}'", kind="form")
-            await box.click()
-            await box.press_sequentially(ans.value, delay=20)
-        send = await self.engine.find(CHAT_SEND, timeout_ms=2000)
+            raise ManualActionRequired(f"Could not find the answer box for '{question}'", kind="form")
         if send is not None:
             await self.engine.click(send)
         elif not opts:
             await page.keyboard.press("Enter")
-        for _ in range(20):
+        advanced = await self._wait_chat(page, before, 6)
+        await ctx.log_question(question, ans, filled=True, verified=advanced,
+                               problem="" if advanced else "the chat did not move on")
+        if advanced:
+            return True
+        raise ManualActionRequired(f"Naukri did not accept the answer to '{question}'", kind="form")
+
+    async def _wait_chat(self, page: Page, before: int, seconds: float) -> bool:
+        for _ in range(int(seconds / 0.3)):
             if await self._chat_advanced(page, before):
                 return True
             await page.wait_for_timeout(300)
-        raise ManualActionRequired(f"Naukri did not accept the answer to '{question}'", kind="form")
+        return False
+
+    async def _chat_controls(self, page: Page, question: str):
+        """Answer controls for the latest question: Naukri's known widgets first, then whatever the chat shows."""
+        options = await self._chat_options(page)
+        known = [(label, loc, kind) for kind in ("radio", "checkbox", "chips") for label, loc in options[kind]]
+        text_box = None if known else await self.engine.find(CHAT_TEXT_INPUT, timeout_ms=1500)
+        send = await self.engine.find(CHAT_SEND, timeout_ms=800)
+        if known or text_box is not None:
+            return known, text_box, send
+        try:
+            found = await page.evaluate(_GENERIC_CHAT_JS, question)
+        except PlaywrightError:
+            found = None
+        if not found:
+            return [], None, send
+        opts = [(o["text"], page.locator(f'[data-pja-chat="{o["id"]}"]').first, o["kind"]) for o in found["options"]]
+        box = None
+        if not opts and found["inputs"]:
+            box = page.locator(f'[data-pja-chat="{found["inputs"][0]["id"]}"]').first
+        if send is None and found.get("send"):
+            send = page.locator(f'[data-pja-chat="{found["send"]}"]').first
+        return opts, box, send
+
+    async def _click_option(self, loc: Locator) -> None:
+        try:
+            tag = await loc.evaluate("e => e.tagName + ':' + (e.type || '')")
+            if tag in {"INPUT:radio", "INPUT:checkbox"}:
+                try:
+                    await loc.check(timeout=3000)
+                    return
+                except PlaywrightError:
+                    await loc.evaluate("e => { const l = (e.id && document.querySelector('label[for=\"' + e.id + '\"]'))"
+                                       " || e.closest('label'); (l || e).click(); }")
+                    return
+        except PlaywrightError:
+            pass
+        await self.engine.click(loc)
+
+    async def _pick_suggestion(self, page: Page, box: Locator, value: str) -> None:
+        """Typeahead answers (city, skills...): pick the matching suggestion when the chat offers a list."""
+        await page.wait_for_timeout(700)
+        sugg = page.locator("[role='option']:visible, [role='listbox'] li:visible, [class*='suggest' i] li:visible, "
+                            "[class*='suggest' i] div:visible")
+        try:
+            n = min(await sugg.count(), 20)
+            texts = [((await sugg.nth(i).inner_text()) or "").strip() for i in range(n)]
+        except PlaywrightError:
+            return
+        picked = choose_option(value, [t for t in texts if t], min_score=75) if texts else None
+        if picked:
+            await sugg.nth(texts.index(picked)).click()
 
     async def _chat_advanced(self, page: Page, before: int) -> bool:
         if await self._detect_success(page):
@@ -370,6 +631,61 @@ class NaukriAdapter(PortalAdapter):
                     out[kind] = items
                     break
         return out
+
+
+class ChatFinished(Exception):
+    """The screening chatbot ended (e.g. 'Thank you for your responses.') without a question."""
+
+
+_GENERIC_CHAT_JS = r"""
+(lastText) => {
+  const T = (e) => (e.innerText || e.textContent || '').replace(/\s+/g, ' ').trim();
+  const shown = (e) => !!e && e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
+  const all = Array.from(document.querySelectorAll('li, p, span, div')).filter(e => shown(e) && T(e) === lastText);
+  const anchor = all.length ? all[all.length - 1] : null;
+  if (!anchor) return null;
+  const CTRL = 'input:not([type=hidden]), textarea, select, [contenteditable="true"], [role="radio"], [role="checkbox"], [role="option"], [style*="cursor: pointer"], [style*="cursor:pointer"]';
+  let box = anchor;
+  for (let d = 0; d < 10 && box.parentElement && box !== document.body; d++) {
+    box = box.parentElement;
+    if (Array.from(box.querySelectorAll(CTRL)).some(e => e !== anchor && !anchor.contains(e))) break;
+  }
+  const after = (e) => !!(anchor.compareDocumentPosition(e) & Node.DOCUMENT_POSITION_FOLLOWING) && !anchor.contains(e);
+  const tag = (e) => { if (!e.dataset.pjaChat) { window.__pjaChat = (window.__pjaChat || 0) + 1; e.dataset.pjaChat = 'c' + window.__pjaChat; } return e.dataset.pjaChat; };
+  const labelOf = (inp) => { const l = (inp.id && document.querySelector('label[for="' + CSS.escape(inp.id) + '"]')) || inp.closest('label'); return l ? T(l) : (inp.value || inp.getAttribute('aria-label') || ''); };
+  const isMsg = (e) => !!e.closest('li[class*="bot" i], li[class*="user" i], [class*="botItem" i], [class*="userItem" i], [class*="botMsg" i]');
+  const SEND = /^(save|send|submit|next|done|skip)$/i;
+  const options = []; const seen = new Set();
+  box.querySelectorAll('input[type=radio], input[type=checkbox], [role=radio], [role=checkbox], [role=option]').forEach(e => {
+    if (!after(e) || isMsg(e)) return;
+    if (!(shown(e) || shown(e.closest('label')) || shown(e.parentElement))) return;
+    const text = e.tagName === 'INPUT' ? labelOf(e) : T(e);
+    if (!text || text.length > 80 || seen.has(text)) return;
+    seen.add(text);
+    options.push({ id: tag(e), text, kind: e.type === 'checkbox' || e.getAttribute('role') === 'checkbox' ? 'checkbox' : 'radio' });
+  });
+  if (!options.length) {
+    box.querySelectorAll('div, span, button, li, a, label').forEach(e => {
+      if (!after(e) || !shown(e) || isMsg(e) || e.querySelector('input, textarea, [contenteditable="true"]')) return;
+      const text = T(e);
+      if (!text || text.length > 60 || seen.has(text) || SEND.test(text)) return;
+      if (Array.from(e.children).some(c => T(c) === text)) return;
+      const clickable = getComputedStyle(e).cursor === 'pointer' || e.tagName === 'BUTTON' || e.getAttribute('role');
+      if (!clickable) return;
+      seen.add(text);
+      options.push({ id: tag(e), text, kind: 'chip' });
+    });
+  }
+  const inputs = [];
+  box.querySelectorAll('input:not([type=hidden]):not([type=radio]):not([type=checkbox]), textarea, [contenteditable="true"], select').forEach(e => {
+    if (shown(e)) inputs.push({ id: tag(e), kind: e.tagName === 'SELECT' ? 'select' : (e.isContentEditable ? 'contenteditable' : 'text') });
+  });
+  const sendEl = Array.from(box.querySelectorAll('button, [role=button], div, span')).find(e => shown(e) && after(e)
+      && SEND.test(T(e) || e.getAttribute('aria-label') || '') && !/^skip$/i.test(T(e))
+      && !Array.from(e.children).some(c => T(c) === T(e)));  // the innermost element, not its wrapper
+  return { options, inputs, send: sendEl ? tag(sendEl) : null };
+}
+"""
 
 
 def _id_from_url(url: str) -> str:

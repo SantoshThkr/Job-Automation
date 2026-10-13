@@ -1,0 +1,27 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Job Application for Frontend Engineer at KitCo</title></head><body>
+<div id="app_body">
+  <div id="header"><h1 class="app-title">Frontend Engineer</h1><span class="company-name">at KitCo</span></div>
+  <div id="content"><p>Build our payments dashboard in React, TypeScript and Next.js.</p></div>
+  <a id="apply_button" class="button" href="#app">Apply for this job</a>
+  <div id="application">
+  <form id="application_form" action="/ats/greenhouse/confirmation.html" method="post" enctype="multipart/form-data">
+    <div class="field"><label for="first_name">First Name <span class="asterisk">*</span></label><input type="text" id="first_name" required></div>
+    <div class="field"><label for="last_name">Last Name <span class="asterisk">*</span></label><input type="text" id="last_name" required></div>
+    <div class="field"><label for="email">Email <span class="asterisk">*</span></label><input type="text" id="email" required></div>
+    <div class="field" id="resume_fieldset"><label for="resume">Resume/CV <span class="asterisk">*</span></label><input type="file" id="resume" accept=".pdf,.doc,.docx"></div>
+    <div id="custom_fields"></div>
+    <div class="error" id="err" hidden></div>
+    <input type="submit" id="submit_app" value="Submit Application">
+  </form></div>
+</div>
+<script src="/kit/kit.js"></script>
+<script>
+  const box = document.getElementById('custom_fields');
+  kitRender(box, ['phone', 'months', 'located', 'fresher', 'title', 'authorized', 'workauth', 'notice', 'why', 'graphql',
+                  'blood', 'github', 'exp'], {company: 'KitCo', phoneCheck: 'submit'});
+  document.getElementById('application_form').addEventListener('submit', (e) => {
+    const errs = kitValid(box), err = document.getElementById('err');
+    if (errs.length) { e.preventDefault(); err.textContent = errs.join(' '); err.hidden = false; return; }
+    sessionStorage.kitSent = JSON.stringify(kitData(box));  // kept across the confirmation page load
+  });
+</script></body></html>

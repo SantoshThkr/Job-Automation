@@ -9,12 +9,25 @@ from playwright.async_api import Error as PlaywrightError, Page
 
 SUCCESS_TEXT = re.compile(
     r"successfully\s+applied|applied\s+successfully|application\s+(?:has\s+been\s+|was\s+)?(?:sent|submitted|received)|"
-    r"you\s+(?:have\s+)?applied|thank\s+you\s+for\s+(?:applying|your\s+application|submitting)|"
-    r"your\s+application\s+(?:has\s+been|was)\s+(?:sent|submitted|received)|we(?:'ve|\s+have)\s+received\s+your\s+application",
+    r"you\s+(?:have\s+)?applied|thank\s+you\s+for\s+(?:applying|your\s+application|submitting)|thanks\s+for\s+applying|"
+    r"your\s+application\s+(?:has\s+been|was|is)\s+(?:successfully\s+)?(?:sent|submitted|received|complete)|"
+    r"we(?:'ve|\s+have)\s+(?:successfully\s+)?received\s+your\s+(?:application|resume|cv|profile)|"
+    r"application\s+(?:has\s+been\s+)?completed\b|submission\s+(?:was\s+)?successful|"
+    r"successfully\s+submitted\s+your\s+application|your\s+(?:resume|cv|profile)\s+(?:has\s+been|was)\s+"
+    r"(?:successfully\s+)?(?:sent|submitted|received)|"
+    r"(?:the\s+|your\s+)?(?:form|details)\s+(?:was\s+|were\s+|has\s+been\s+|have\s+been\s+)?(?:sent|submitted)\s+successfully",
     re.I)
 
-EXPIRED_TEXT = re.compile(r"no\s+longer\s+(?:available|accepting)|job\s+(?:has\s+)?expired|this\s+job\s+is\s+closed|"
-                          r"position\s+has\s+been\s+filled|not\s+accepting\s+applications", re.I)
+# the site failed while receiving the form: the application may or may not have arrived
+SERVER_ERROR_TEXT = re.compile(r"^\s*(?:5\d\d\s+[a-z ]{3,40}|bad\s+gateway|service\s+(?:temporarily\s+)?unavailable|"
+                               r"internal\s+server\s+error|gateway\s+time-?out)\b", re.I)
+
+EXPIRED_TEXT = re.compile(
+    r"no\s+longer\s+(?:available|accepting|active|open)|job\s+(?:has\s+|is\s+)?expired|this\s+job\s+is\s+(?:closed|no\s+longer)|"
+    r"(?:position|job|role|vacancy|requisition|opening)\s+(?:has\s+been\s+|is\s+|was\s+)?(?:filled|closed)\b|"
+    r"not\s+accepting\s+applications|job\s+you\s+are\s+looking\s+for\s+(?:is\s+|has\s+)?(?:expired|closed|not\s+available|"
+    r"no\s+longer|been\s+removed)|posting\s+(?:has\s+)?(?:expired|closed|been\s+removed)|applications?\s+(?:are\s+|is\s+)?closed|"
+    r"job\s+(?:posting\s+)?(?:not\s+found|does\s+not\s+exist|is\s+unavailable)", re.I)
 
 
 def slugify(text: str) -> str:
@@ -82,3 +95,24 @@ async def page_has_success(page: Page) -> str:
         return ""
     m = SUCCESS_TEXT.search(body or "")
     return m.group(0) if m else ""
+
+
+async def generic_apply_button(page: Page):
+    """Find the job page's Apply button by what it says (not by markup) when a portal's selectors fail.
+
+    Returns ("external" | "apply", locator) or None. "external" = an "Apply on company site" style button.
+    """
+    from app.navigator.classify import Kind
+    from app.navigator.observe import observe
+
+    try:
+        snap = await observe(page)
+    except PlaywrightError:
+        return None
+    cands = [e for e in snap.by_kind(Kind.APPLY) if not e.ctx]
+    if not cands:
+        return None
+    best = sorted(cands, key=lambda e: (0 if e.tag in {"button", "input"} else 1, e.y))[0]
+    loc = snap.frame(best.frame).locator(best.selector).first
+    kind = "external" if re.search(r"company|employer|corporate", best.label, re.I) else "apply"
+    return kind, loc

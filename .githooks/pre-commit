@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Refuse a commit that contains a private file, your personal details or a credential.
+# Enabled by `make hooks` (git config core.hooksPath .githooks). Bypass on purpose only: git commit --no-verify
+set -euo pipefail
+root="$(git rev-parse --show-toplevel)"
+py="$root/backend/.venv/bin/python"; [ -x "$py" ] || py="$(command -v python3)"
+exec "$py" "$root/scripts/privacy_check.py" --staged

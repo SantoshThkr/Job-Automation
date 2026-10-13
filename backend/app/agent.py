@@ -64,7 +64,7 @@ async def _heartbeat(control: AgentControl) -> None:
 
 
 async def run_agent(mode: str | None = None, portals: list[str] | None = None, repeat_minutes: int | None = None,
-                    headless: bool | None = None) -> int:
+                    headless: bool | None = None, max_applications: int | None = None) -> int:
     setup_logging("agent")
     init_db()
     lock = AgentLock()
@@ -111,6 +111,7 @@ async def run_agent(mode: str | None = None, portals: list[str] | None = None, r
     engine = BrowserEngine(headless=headless, checkpoint=control.checkpoint)
     assistant = JobAssistant() if settings.ai_enabled else None
     orchestrator = Orchestrator(engine, control, assistant=assistant)
+    orchestrator.max_applications = max_applications  # a cap for this run only (the profile is not changed)
     exit_code = 0
     try:
         while True:
@@ -158,9 +159,23 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--portals", help="comma separated: naukri,linkedin,instahyre (default: profile.json)")
     p.add_argument("--repeat-minutes", type=int, help="run again every N minutes (0 = single run)")
     p.add_argument("--headless", action="store_true", help="run the browser headless (no login possible)")
+    p.add_argument("--max-applications", type=int, help="stop applying after N attempts in this run")
     a = p.parse_args(argv)
     portals = [x.strip() for x in a.portals.split(",") if x.strip()] if a.portals else None
-    return asyncio.run(run_agent(a.mode, portals, a.repeat_minutes, True if a.headless else None))
+    import os
+
+    from app.config import ConfigError
+    from app.security import harden_permissions
+
+    os.umask(0o077)  # screenshots, logs, the database and the browser profile: your account only
+    try:
+        get_settings()
+    except ConfigError as exc:
+        sys.stderr.write(f"\n{exc}\n\nThe agent was not started.\n")
+        return 2
+    harden_permissions()
+    return asyncio.run(run_agent(a.mode, portals, a.repeat_minutes, True if a.headless else None,
+                                 a.max_applications))
 
 
 if __name__ == "__main__":

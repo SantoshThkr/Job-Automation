@@ -1,0 +1,21 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Careers - React JS Developer | NimbusLab</title></head><body>
+<!-- nimbusnext.com / ansaumdigital.com (run #23): the same boxes plus a resume upload - a real application, answered by
+     Contact Form 7 with "Thank you for your message. It has been sent." -->
+<h1>React JS Developer</h1>
+<section><h2>Job description</h2><p>3+ years of experience with React, Redux and TypeScript.</p></section>
+<form id="apply">
+ <label for="n">Your name</label><input id="n" name="fullname" required>
+ <label for="e">Your email</label><input id="e" name="email" type="email" required>
+ <label for="p">Contact number</label><input id="p" name="phone" type="tel" required>
+ <label for="m">Your message</label><textarea id="m" name="message"></textarea>
+ <label for="f">Upload resume</label><input id="f" name="resume" type="file" required>
+ <button type="submit">Submit</button>
+</form><div id="out"></div>
+<script>
+  window.SUBMITS = 0;
+  document.querySelector('form').addEventListener('submit', async (e) => {
+    e.preventDefault(); window.SUBMITS++;
+    await fetch('/submit-lab/api/apply?r=cf7', { method: 'POST', body: '{}' }).then(r => r.text());
+    document.getElementById('out').innerHTML = '<div class="wpcf7-response-output">Thank you for your message. It has been sent.</div>';
+  });
+</script></body></html>

@@ -1,0 +1,30 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Apply - Frontend Engineer - KitCo</title></head><body>
+<main><h1>Apply for Frontend Engineer</h1>
+<form id="app">
+ <div class="kq"><label for="resume">Resume/CV*</label><input type="file" id="resume" required accept=".pdf,.doc,.docx"></div>
+ <div id="kit"></div>
+ <p class="error" id="err" hidden></p>
+ <button type="submit" id="sub">Submit application</button>
+</form>
+<div id="done" hidden><h2>Thank you for applying!</h2><p>Your application has been received.</p></div>
+</main>
+<script src="/kit/kit.js"></script>
+<script>
+  sessionStorage.kitLoads = (+sessionStorage.kitLoads || 0) + 1;   // the page is never reloaded while you answer
+  const form = document.getElementById('app'), kit = document.getElementById('kit'), err = document.getElementById('err');
+  kitRender(kit, ['email', 'phone', 'months', 'located', 'fresher', 'title', 'authorized', 'workauth', 'notice', 'why',
+                  'graphql', 'blood', 'github', 'exp'], {company: 'KitCo', phoneCheck: 'submit'});
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    const errs = kitValid(kit);
+    if (!document.getElementById('resume').files.length) errs.push('Resume is required.');
+    if (errs.length) { err.textContent = errs.join(' '); err.hidden = false; window.REJECTED = (window.REJECTED || 0) + 1; return; }
+    err.hidden = true;
+    window.SUBMITTED = kitData(kit);
+    const qs = new URLSearchParams(location.search);
+    if (qs.has('noconfirm')) return;   // the site never confirms
+    if (qs.has('servererror')) { document.body.innerHTML = '<h1>502 Bad Gateway</h1><hr><center>nginx</center>'; return; }
+    if (qs.has('successbox')) { err.textContent = 'The form was sent successfully.'; err.hidden = false; return; }
+    form.hidden = true; document.getElementById('done').hidden = false;
+  };
+</script></body></html>

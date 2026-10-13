@@ -1,21 +1,133 @@
-# personal data - never commit
-.env
+# =====================================================================================
+# PERSONAL DATA AND SECRETS - never commit. (This file only keeps NEW files out of Git:
+# it does not untrack a file that is already tracked and does not rewrite history.
+# `make privacy-check` verifies what Git can actually see.)
+# =====================================================================================
+
+# --- your profile and local configuration (the tracked template is config/profile.example.json)
 config/profile.json
+config/profile.*.json
+!config/profile.example.json
+config/*.local.json
+config/*.private.json
+config/local/
+
+# --- environment files (the tracked template is .env.example)
+.env
+.env.*
+!.env.example
+*.env
+!*.env.example
+
+# --- resumes and other personal documents
 resumes/*
 !resumes/README.md
+
+# --- runtime data: database, backups, browser sessions (logged-in cookies), logs, screenshots
 data/
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.bak
+*.backup
+*.dump
+*.sql.gz
+browser-profile/
+**/browser-profile/
+playwright/.auth/
+storage-state*.json
+*storageState*.json
+cookies*.json
+cookies*.txt
+*.cookies
+*.har
+
+# --- logs, traces, screenshots and other debug artifacts that capture personal form data
+logs/
+*.log
+*.log.*
+*.trace
+trace.zip
+traces/
+test-results/
+playwright-report/
+screenshots/
+*-manual.png
+*-unconfirmed*.png
+
+# --- generated reports / exports of your applications
+reports/
+exports/
+*.export.json
+*.export.csv
+
+# --- credentials and keys
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
+*.gpg
+secrets/
+secrets.*
+credentials.*
+service-account*.json
+.netrc
+.npmrc
+.pypirc
+.aws/
+.ssh/
+
+# =====================================================================================
+# build output, caches, tooling
+# =====================================================================================
 
 # python
 backend/.venv/
+.venv/
+venv/
 __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
 
 # node
 frontend/node_modules/
+node_modules/
 frontend/.next/
+.next/
+frontend/out/
+frontend/coverage/
 frontend/tsconfig.tsbuildinfo
+*.tsbuildinfo
 frontend/next-env.d.ts
 
+# scanners
+.gitleaks-report*.json
+gitleaks-report*.json
+.secrets.baseline.tmp
+
+# OS / editors
 .DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*~
+
+# a profile being rewritten (transient)
+config/*.tmp

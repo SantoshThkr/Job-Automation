@@ -1,0 +1,15 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Apply - Zeta</title></head><body>
+<main><h1>Apply: Senior React Developer</h1>
+<form id="f"><label for="n">Full name *</label><input id="n" name="name" required>
+<label for="e">Email *</label><input id="e" type="email" name="email" required>
+<label for="r">Resume *</label><input id="r" type="file" name="resume" required>
+<div class="g-recaptcha" data-sitekey="test" style="width:304px;height:78px;border:1px solid #999;padding:8px">
+<input type="checkbox" id="robot" aria-label="I'm not a robot"> I'm not a robot</div>
+<p id="err" class="error" hidden></p>
+<button type="submit">Submit application</button></form></main>
+<script>
+document.getElementById('f').addEventListener('submit', (e) => { e.preventDefault();
+  if (!document.getElementById('robot').checked) { err.hidden = false; err.textContent = 'Please complete the CAPTCHA'; return; }
+  document.querySelector('main').innerHTML = '<h1>Thanks for applying!</h1><p>Your application was submitted.</p>';
+});
+</script></body></html>

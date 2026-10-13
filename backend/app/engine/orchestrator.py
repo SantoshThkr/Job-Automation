@@ -1,12 +1,17 @@
-"""Job Engine: discovery -> matching -> application -> recording, one job at a time.
+"""Job Engine: discovery -> matching -> prioritised applications -> recording.
+
+Per portal: search every query, read and evaluate each new job (rules + local AI), then apply to the
+relevant ones in priority order (best match first: React / Next.js before Angular-only, etc.).
 
 Guarantees:
 * one failing job never stops the run (each job is isolated; failures are recorded with screenshots);
 * duplicates (same portal id, or same company+title applied via another portal) are skipped;
 * a job is APPLIED only with a detected confirmation;
 * interrupted applications are recovered on the next start (re-queued, or flagged for verification
-  when a submit may already have happened);
-* pause / resume / stop are honoured between every browser action.
+  when a submit may already have happened); parked company-site applications continue from the page
+  where they stopped instead of starting over;
+* pause / resume / stop are honoured between every browser action;
+* a lost internet connection pauses the run until it is back instead of failing it.
 """
 
 from __future__ import annotations
@@ -14,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import socket
 from collections import Counter
 from collections.abc import Callable
 from typing import Any
@@ -24,6 +30,7 @@ from app.ai.job_assistant import JobAssistant
 from app.answers.answerer import Answerer
 from app.answers.question_bank import Answer, QuestionContext
 from app.ats.external import apply_external
+from app.engine.submission import verify_page
 from app.browser.engine import BrowserEngine
 from app.browser.errors import LoginRequired, ManualActionRequired, NavigationFailed, StopRequested
 from app.browser.forms import FormField
@@ -37,12 +44,14 @@ from app.engine.recorder import (
     local_day_start_utc,
     memory_lookup_fn,
     record_answer,
+    remember_answer,
     save_match,
     set_status,
     start_application,
     upsert_job,
 )
 from app.matching.matcher import JobMatcher
+from app.matching.rules import title_prescreen
 from app.models import (
     ActualState,
     AgentMode,
@@ -65,7 +74,11 @@ AdapterFactory = Callable[[str, BrowserEngine], PortalAdapter | None]
 # Statuses that mean "already handled - do not process again during discovery"
 _HANDLED = {JobStatus.APPLIED, JobStatus.ALREADY_APPLIED, JobStatus.DUPLICATE, JobStatus.SKIPPED,
             JobStatus.REVIEW_PENDING, JobStatus.MANUAL_ACTION_REQUIRED, JobStatus.DRY_RUN, JobStatus.FAILED,
-            JobStatus.AWAITING_APPROVAL, JobStatus.APPLYING}
+            JobStatus.AWAITING_APPROVAL, JobStatus.APPLYING, JobStatus.QUEUED, JobStatus.EXPIRED}
+
+_NETWORK_ERRORS = ("ERR_NAME_NOT_RESOLVED", "ERR_INTERNET_DISCONNECTED", "ERR_NETWORK_CHANGED",
+                   "ERR_CONNECTION_RESET", "ERR_CONNECTION_REFUSED", "ERR_ADDRESS_UNREACHABLE",
+                   "ERR_NETWORK_IO_SUSPENDED", "ERR_CONNECTION_TIMED_OUT", "ERR_TIMED_OUT")
 
 
 def default_adapter_factory(name: str, engine: BrowserEngine) -> PortalAdapter | None:
@@ -74,18 +87,30 @@ def default_adapter_factory(name: str, engine: BrowserEngine) -> PortalAdapter |
     return create_adapter(name, engine)
 
 
+def is_network_error(exc: BaseException) -> bool:
+    return any(code in str(exc) for code in _NETWORK_ERRORS)
+
+
 class Orchestrator:
     def __init__(self, engine: BrowserEngine, control: AgentControl, *, assistant: JobAssistant | None = None,
-                 adapter_factory: AdapterFactory = default_adapter_factory) -> None:
+                 adapter_factory: AdapterFactory = default_adapter_factory,
+                 network_probe: Callable[[], bool] | None = None) -> None:
         self.engine = engine
         self.control = control
         self.assistant = assistant
+        self.portal_limits: dict[str, str] = {}
+        self.last_sample = None  # the latest [RESOURCE] sample
+        self._memory_state = "ok"
+        self.memory_stop = ""  # why applying was stopped for lack of memory ('' = it was not)  # portal -> what it said when it stopped taking applications
+        self._unregistered: dict[str, list[int]] = {}  # portal -> jobs whose Apply click verifiably did nothing
         self.adapter_factory = adapter_factory
         self.adapters: dict[str, PortalAdapter] = {}
         self.stats: Counter[str] = Counter()
         self.run_id: int | None = None
         self.mode = AgentMode.DRY_RUN
         self.profile: Profile | None = None
+        self.network_probe = network_probe or _internet_available
+        self.max_applications: int | None = None  # per-run cap (agent --max-applications)
 
     # ------------------------------------------------------------ helpers
     def _event(self, job_id: int | None, type_: str, message: str, *, level: str = "info",
@@ -105,8 +130,9 @@ class Orchestrator:
     def _limits_reached(self) -> str:
         p = self.profile
         assert p is not None
-        if self.stats["apply_attempts"] >= p.search.max_applications_per_run:
-            return f"run limit of {p.search.max_applications_per_run} applications reached"
+        cap = min(p.search.max_applications_per_run, self.max_applications or 10**6)
+        if self.stats["apply_attempts"] >= cap:
+            return f"run limit of {cap} applications reached"
         with session_scope() as s:
             today = applications_since(s, local_day_start_utc(0))
         if today >= p.search.max_applications_per_day:
@@ -118,6 +144,21 @@ class Orchestrator:
         while asyncio.get_running_loop().time() < end:
             await self.control.checkpoint()
             await asyncio.sleep(min(1.0, max(0.0, end - asyncio.get_running_loop().time())))
+
+    async def _wait_for_network(self, max_minutes: float = 30) -> bool:
+        """The internet dropped (DNS / connection errors): wait for it instead of failing the run."""
+        if self.network_probe():
+            return True
+        self._event(None, "network", "No internet connection - waiting for it to come back", level="warning")
+        self.control.update(message="Waiting for the internet connection")
+        deadline = asyncio.get_running_loop().time() + max_minutes * 60
+        while asyncio.get_running_loop().time() < deadline:
+            self.control.activity("Waiting for the internet connection...")
+            await self._sleep(15)
+            if self.network_probe():
+                self._event(None, "network", "Internet connection is back - continuing")
+                return True
+        return False
 
     # ---------------------------------------------------------------- run
     async def run(self) -> dict[str, Any]:
@@ -138,22 +179,22 @@ class Orchestrator:
         status, error = "COMPLETED", ""
         try:
             self.recover_interrupted()
-            await self.engine.start()
-            await self.process_queue(portals)
+            await self._report_ai_status()
+            if await self._memory_blocked():  # out of memory before anything started: no browser is opened at all
+                portals = []
+            else:
+                await self.engine.start()
+                await self._resources("run_start")
+                await self.process_queue(portals, label="left from earlier runs")
             for portal in portals:
                 await self.control.checkpoint()
-                try:
-                    await self.discover_portal(portal)
-                except LoginRequired as exc:
-                    self.stats["login_required"] += 1
-                    self._event(None, "login_required", f"{portal}: {exc.reason} - skipped this portal", level="warning")
-                except (StopRequested, asyncio.CancelledError):
-                    raise
-                except Exception as exc:  # a broken portal must not stop the other portals
-                    log.exception("Portal %s failed", portal)
-                    self.stats["portal_errors"] += 1
-                    shot = await self._safe_capture(f"portal-{portal}")
-                    self._event(None, "portal_error", f"{portal}: {exc}", level="error", screenshot=shot)
+                if await self._memory_blocked():
+                    self._event(None, "limit", f"{portal}: no new search - the run stopped for lack of memory")
+                    continue
+                if self.max_applications and self._limits_reached():
+                    self._event(None, "limit", f"{portal}: application cap of this run reached - no new search")
+                    continue
+                await self._portal_pass(portal)
         except StopRequested:
             status = "STOPPED"
             self._event(None, "run_stopped", "Run stopped by you")
@@ -171,15 +212,77 @@ class Orchestrator:
                     run.stats = dict(self.stats)
                     run.finished_at = utcnow()
             summary = _summary(self.stats)
+            if self.assistant is not None:  # free the model's memory now, not after its keep-alive
+                try:
+                    await self.assistant.provider.unload()
+                except Exception as exc:  # noqa: BLE001 - never fails a run
+                    log.debug("AI unload failed: %s", exc)
+            if self.engine.alive:
+                await self._resources("run_end", application=self.stats["apply_attempts"])
             self._event(None, "run_finished", f"Run #{self.run_id} {status.lower()}: {summary}")
-            self.control.update(message=f"Last run {status.lower()}: {summary}", current_activity="")
+            self.control.update(message=f"Last run {status.lower()}: {summary}", current_activity="",
+                                current_job_id=None, current_step="", current_url="", phase="idle")
         return {"run_id": self.run_id, "status": status, "error": error, "stats": dict(self.stats)}
+
+    def _requeue_unregistered(self, portal: str, why: str) -> None:
+        with session_scope() as s:
+            for jid in self._unregistered.pop(portal, []):
+                job = s.get(Job, jid)
+                if job is None or job.status != JobStatus.MANUAL_ACTION_REQUIRED:
+                    continue
+                if job.application is not None:
+                    job.application.manual_action_reason = ""
+                set_status(s, job, JobStatus.QUEUED, f"Kept in the queue: {portal} {why} - will be applied on a later run")
+                add_event(s, job.id, "requeued", f"Back in the queue: {portal} {why}", run_id=self.run_id)
+                self.stats["result_manual_action_required"] -= 1
+                self.stats["deferred"] += 1
+
+    async def _report_ai_status(self) -> None:
+        """One line in the run log about the local model. When it is enabled but cannot be used, that is a warning
+        you see in the dashboard: written answers, unusual question wording and unknown pages then come to you."""
+        if self.assistant is None:
+            return
+        try:
+            health = await self.assistant.provider.health(use_cache=False)
+        except Exception as exc:  # noqa: BLE001 - a status line never stops a run
+            log.debug("AI status check failed: %s", exc)
+            return
+        if not health.get("enabled"):
+            self._event(None, "ai_status", "Local AI is switched off (PJA_AI_ENABLED=false): only rules and your saved "
+                                           "answers are used")
+        elif health.get("available") and health.get("model_present"):
+            self._event(None, "ai_status", f"Local AI ready: {health.get('model')} at {health.get('url')}")
+        else:
+            self.stats["ai_unavailable"] = 1
+            self._event(None, "ai_unavailable",
+                        f"Local AI is NOT available - {health.get('error') or 'unknown reason'}. Written answers (bio, "
+                        "cover note, 'why us'), unusually worded questions and pages the rules do not recognise will "
+                        "be left for you in this run.", level="warning")
+
+    async def _portal_pass(self, portal: str, attempt: int = 0) -> None:
+        """Discover + evaluate everything on one portal, then apply to its relevant jobs, best first."""
+        try:
+            await self.discover_portal(portal)
+            await self.process_queue([portal])
+        except LoginRequired as exc:
+            self.stats["login_required"] += 1
+            self._event(None, "login_required", f"{portal}: {exc.reason} - skipped this portal", level="warning")
+        except (StopRequested, asyncio.CancelledError):
+            raise
+        except Exception as exc:  # a broken portal must not stop the other portals
+            if is_network_error(exc) and attempt == 0 and await self._wait_for_network():
+                await self._portal_pass(portal, attempt + 1)
+                return
+            log.exception("Portal %s failed", portal)
+            self.stats["portal_errors"] += 1
+            shot = await self._safe_capture(f"portal-{portal}")
+            self._event(None, "portal_error", f"{portal}: {exc}", level="error", screenshot=shot)
 
     async def _safe_capture(self, name: str) -> str | None:
         try:
             if self.engine.alive:
-                return (await self.engine.capture_failure(name)).get("screenshot")
-        except Exception:
+                return (await asyncio.wait_for(self.engine.capture_failure(name), 30)).get("screenshot")
+        except Exception:  # noqa: BLE001 - evidence only (asyncio.TimeoutError included): never fails or stalls a run
             pass
         return None
 
@@ -204,21 +307,54 @@ class Orchestrator:
                 self.stats["recovered"] += 1
 
     # --------------------------------------------------------------- queue
-    async def process_queue(self, portals: list[str]) -> None:
+    async def process_queue(self, portals: list[str], label: str = "") -> None:
+        """Apply to queued jobs, highest match score first."""
+        if self.memory_stop:
+            return
         with session_scope() as s:
-            queued = s.scalars(select(Job).where(Job.status == JobStatus.QUEUED, Job.portal.in_(portals))
-                               .order_by(Job.updated_at)).all()
+            queued = s.scalars(select(Job).where(Job.status == JobStatus.QUEUED, Job.portal.in_(portals))).all()
+            queued = sorted(queued, key=lambda j: (-(j.match_score or 0), j.updated_at or utcnow()))
             items = [(j.id, j.portal, _posting_from_job(j)) for j in queued]
         if not items:
             return
-        self._event(None, "queue", f"{len(items)} queued job(s) to process")
+        blockers = [i.message for i in blocking_issues(get_profile_store().load())]
+        if blockers and self.mode != AgentMode.DRY_RUN:
+            self.stats["waiting_for_profile"] += len(items)
+            if self.stats["profile_warned"]:
+                return
+            self.stats["profile_warned"] = 1
+            self._event(None, "profile_incomplete",
+                        f"{len(items)} relevant job(s) kept in the queue: complete config/profile.json first ("
+                        + "; ".join(blockers[:4]) + "). Dry Run still works.", level="warning")
+            return
+        self._event(None, "queue", f"{len(items)} relevant job(s) to apply to" + (f" ({label})" if label else "")
+                    + ", best match first")
+        self.control.live(phase="applying")
         logged_in: set[str] = set()
-        for job_id, portal, posting in items:
+        for n, (job_id, portal, posting) in enumerate(items):
             await self.control.checkpoint()
             reason = self._limits_reached()
             if reason:
-                self._event(None, "limit", f"Stopping applications: {reason}")
+                left = len(items) - n
+                self.stats["deferred"] += left
+                self._event(None, "limit", f"Stopping applications: {reason} ({left} job(s) kept for the next run)")
                 return
+            if await self._memory_blocked(left=len(items) - n):
+                self.stats["deferred"] += len(items) - n
+                return
+            with session_scope() as s:
+                job = s.get(Job, job_id)
+                if job is None or job.status != JobStatus.QUEUED:
+                    continue  # handled meanwhile (dashboard skip, duplicate...)
+                native = job.apply_type != "external"  # applied on the portal itself (not on a company site)
+                if portal in self.portal_limits and native:
+                    self.stats["deferred"] += 1  # stays queued: the portal is not taking applications right now
+                    continue
+                dup = find_duplicate(s, job)
+                if dup is not None:
+                    set_status(s, job, JobStatus.DUPLICATE, f"Same role already handled via {dup.portal} (job #{dup.id})")
+                    self.stats["duplicates"] += 1
+                    continue
             adapter = self._adapter(portal)
             if adapter is None:
                 continue
@@ -229,7 +365,33 @@ class Orchestrator:
                 except LoginRequired as exc:
                     self._event(None, "login_required", f"{portal}: {exc.reason}", level="warning")
                     continue
-            await self.apply_job(job_id, adapter, posting)
+                except NavigationFailed as exc:
+                    if is_network_error(exc) and await self._wait_for_network():
+                        continue
+                    raise
+            result = await self.apply_job(job_id, adapter, posting)
+            # A portal that silently stops registering its own Apply clicks (Naukri did this for hours on 2026-10-09:
+            # 14 in a row, each parked as "needs you") is not a problem with those jobs: after two in a row the
+            # portal's own applications wait for the next run, and both jobs go back to the queue.
+            if (native and result.click_ignored and not result.portal_limit
+                    and result.outcome == ApplyOutcome.MANUAL_ACTION_REQUIRED):
+                self._unregistered.setdefault(portal, []).append(job_id)
+                if len(self._unregistered[portal]) >= 2:
+                    result.portal_limit = "it stopped registering Apply clicks (2 in a row, verified by reloading)"
+                    self._requeue_unregistered(portal, result.portal_limit)
+            elif native and not result.portal_limit:
+                self._unregistered.pop(portal, None)  # the portal took (or properly answered) an application again
+            if result.portal_limit and portal not in self.portal_limits:
+                self.portal_limits[portal] = result.portal_limit
+                waiting = sum(1 for _i, p, _p in items[n + 1:] if p == portal)
+                self._event(None, "portal_limit",
+                            f"{adapter.display_name} is not accepting more applications right now "
+                            f"({result.portal_limit[:160]}). Its own applications are paused for this run - up to "
+                            f"{waiting} queued job(s) stay queued for the next run; company-site applications continue.",
+                            level="warning")
+            delay = self.profile.search.delay_between_applications_s if self.profile else []
+            if delay and max(delay) > 0 and n < len(items) - 1:
+                await self._sleep(random.uniform(min(delay), max(delay)))
 
     # ----------------------------------------------------------- discovery
     async def discover_portal(self, portal: str) -> None:
@@ -239,34 +401,45 @@ class Orchestrator:
             return
         assert self.profile is not None
         self.control.activity(f"{adapter.display_name}: checking login")
+        self.control.live(job_id=None, step=f"Checking {adapter.display_name} login", phase="discovering")
         await adapter.ensure_logged_in(DBHumanGate(self.control))
         search = self.profile.search
         years = self.profile.professional.total_experience_years if search.use_experience_filter else None
         for keywords in search.queries:
             for location in (search.locations or [""]):
                 await self.control.checkpoint()
+                if await self._memory_blocked():  # a long search must not push an exhausted machine further
+                    self._event(None, "limit", f"{adapter.display_name}: search stopped - the Mac is out of memory")
+                    return
                 q = SearchQuery(keywords=keywords, location=location, experience_years=years,
                                 posted_within_days=search.posted_within_days, max_pages=search.max_pages_per_query,
                                 max_jobs=search.max_jobs_per_query, easy_apply_only=search.linkedin_easy_apply_only)
                 label = f"{adapter.display_name}: '{keywords}'" + (f" in {location}" if location else "")
                 self.control.activity(f"Searching {label}")
+                self.control.live(job_id=None, step=f"Searching {label}", phase="discovering")  # no stale "current job"
                 self._event(None, "search", f"Searching {label}")
                 found = 0
                 try:
                     async for posting in adapter.search(q):
                         found += 1
                         self.stats["discovered"] += 1
+                        if self.stats["discovered"] % 10 == 0:
+                            await self._resources("discovery", discovered=self.stats["discovered"])
                         await self.control.checkpoint()
                         try:
                             await self.handle_posting(adapter, posting, keywords)
                         except (StopRequested, LoginRequired):
                             raise
                         except Exception as exc:  # isolate each job
+                            if is_network_error(exc):
+                                raise
                             log.exception("Job %s failed", posting.url)
                             self.stats["job_errors"] += 1
                             shot = await self._safe_capture(f"job-{posting.portal}-{posting.external_id}")
                             self._mark_error(posting, exc, shot)
                 except NavigationFailed as exc:
+                    if is_network_error(exc):
+                        raise
                     self._event(None, "search_failed", f"{label}: {exc}", level="error")
                 self._event(None, "search_done", f"{label}: {found} job(s) found")
 
@@ -282,6 +455,7 @@ class Orchestrator:
                       screenshot=shot)
 
     async def handle_posting(self, adapter: PortalAdapter, posting: JobPosting, query: str = "") -> None:
+        """Record, de-duplicate, read and evaluate one listing. Relevant jobs are queued for the apply phase."""
         assert self.profile is not None
         with session_scope() as s:
             job, created = upsert_job(s, posting, run_id=self.run_id, query=query)
@@ -292,6 +466,9 @@ class Orchestrator:
                 self.stats["seen_before"] += 1
                 return
             if posting.already_applied:
+                if _unfinished_elsewhere(job):
+                    self.stats["seen_before"] += 1
+                    return  # (its badge records the click on the company-site link, not an application - see below)
                 set_status(s, job, JobStatus.ALREADY_APPLIED, f"{adapter.display_name} shows this job as applied")
                 self.stats["already_applied"] += 1
                 return
@@ -301,15 +478,37 @@ class Orchestrator:
                 add_event(s, job.id, "duplicate", job.status_reason, run_id=self.run_id)
                 self.stats["duplicates"] += 1
                 return
+            early = title_prescreen(self.profile, posting.title)
+            if early:
+                why = "; ".join(early)
+                save_match(s, job, {"score": 0.0, "decision": Decision.SKIP.value, "blockers": early,
+                                    "reasons": ["Skipped from the title alone (page not opened)"], "flags": [],
+                                    "category": "other"})
+                set_status(s, job, JobStatus.SKIPPED, why)
+                add_event(s, job.id, "evaluated", f"SKIP (title): {why}", run_id=self.run_id)
+                self.stats["skipped"] += 1
+                return
         self.control.activity(f"Reading: {posting.title} @ {posting.company}")
+        self.control.live(job_id=job_id, step=f"Reading the job description: {posting.title} @ {posting.company}",
+                          url=posting.url, phase="discovering")
         if not posting.details_loaded:
+            await self.engine.fresh_page()  # one tab per job read: search results were already collected
             posting = await adapter.fetch_details(posting)
         with session_scope() as s:
             job, _ = upsert_job(s, posting, run_id=self.run_id, query=query)
             if posting.already_applied:
+                if _unfinished_elsewhere(job):
+                    self.stats["seen_before"] += 1
+                    return
                 set_status(s, job, JobStatus.ALREADY_APPLIED, f"{adapter.display_name} shows this job as applied")
                 self.stats["already_applied"] += 1
                 return
+            if posting.extra.get("expired"):
+                set_status(s, job, JobStatus.EXPIRED, "The job is closed / no longer accepting applications")
+                add_event(s, job.id, "expired", job.status_reason, run_id=self.run_id)
+                self.stats["expired"] += 1
+                return
+        self.control.live(step=f"Evaluating fit: {posting.title} @ {posting.company}")
         matcher = JobMatcher(self.profile, self.assistant)
         result = await matcher.evaluate(posting.to_job_input())
         decision = Decision(result.decision)
@@ -324,7 +523,8 @@ class Orchestrator:
             assert job is not None
             save_match(s, job, result.to_dict())
             add_event(s, job.id, "evaluated", f"{decision.value} (score {result.score}): {why}"[:1000],
-                      run_id=self.run_id, data={"score": result.score, "decision": decision.value})
+                      run_id=self.run_id, data={"score": result.score, "decision": decision.value,
+                                                "resume": result.resume_id, "priority": result.priority})
             if decision == Decision.SKIP:
                 set_status(s, job, JobStatus.SKIPPED, why or "Not relevant")
                 self.stats["skipped"] += 1
@@ -333,19 +533,65 @@ class Orchestrator:
                 set_status(s, job, JobStatus.REVIEW_PENDING, why or "Needs your review")
                 self.stats["review_pending"] += 1
                 return
-            set_status(s, job, JobStatus.QUEUED, f"Relevant (score {result.score})")
+            set_status(s, job, JobStatus.QUEUED, f"Relevant (score {result.score})"
+                       + (f" - {result.priority}" if result.priority else ""))
             self.stats["relevant"] += 1
-        reason = self._limits_reached()
-        if reason:
-            self.stats["deferred"] += 1
-            self._event(job_id, "deferred", f"Kept in queue: {reason}")
-            return
-        await self.apply_job(job_id, adapter, posting)
-        delay = self.profile.search.delay_between_applications_s
-        if delay and max(delay) > 0:
-            await self._sleep(random.uniform(min(delay), max(delay)))
 
     # --------------------------------------------------------- application
+    async def verify_submission(self, job_id: int, app_id: int, adapter: PortalAdapter,
+                                posting: JobPosting) -> ApplyResult:
+        """'Retry verification': look again for evidence that an earlier submit went through. Nothing is filled or
+        submitted - the portal's own 'Applied' state, then the page the submit ended on."""
+        self.stats["apply_attempts"] -= 1
+        self.stats["verifications"] += 1
+        with session_scope() as s:
+            app = s.get(Application, app_id)
+            final_url = (app.final_url or "") if app is not None else ""
+            external = app is not None and app.apply_target == "external"
+            add_event(s, job_id, "verify_started", "Re-checking whether the earlier submission went through "
+                                                    "(nothing is submitted again)", application_id=app_id,
+                      run_id=self.run_id)
+        self.control.live(job_id=job_id, step=f"Verifying the submission: {posting.title} @ {posting.company}",
+                          url=final_url or posting.url, phase="applying")
+        text, evidence = "", []
+        try:
+            if not external:
+                await self.engine.fresh_page()
+                details = await adapter.fetch_details(posting)
+                if details.already_applied:
+                    text = f"{adapter.display_name} now shows this job as applied"
+                    evidence.append(f"portal_status: {text}")
+            if not text and final_url and final_url.startswith("http"):  # (a separate tab, closed by verify_page)
+                text, evidence = await verify_page(self.engine, final_url)
+        except Exception as exc:  # noqa: BLE001 - verification never breaks the run
+            log.warning("verification of job %s failed: %s", job_id, exc)
+            evidence.append(f"verification error: {exc}"[:200])
+        with session_scope() as s:
+            job = s.get(Job, job_id)
+            app = s.get(Application, app_id)
+            assert job is not None and app is not None
+            app.verify_requested = False
+            app.verification_checked_at = utcnow()
+            app.verification_evidence = (list(app.verification_evidence or []) + evidence)[-12:]
+            if text:
+                app.verification_state, app.confirmed, app.applied_at = "confirmed", True, utcnow()
+                app.confirmation_text = f"Verified later: {text}"[:2000]
+                set_status(s, job, JobStatus.APPLIED, f"Verified: {text}"[:1000])
+                add_event(s, job.id, "result_applied", f"Verified: {text}", application_id=app_id, run_id=self.run_id)
+                self.stats["verified_applied"] += 1
+                return ApplyResult(ApplyOutcome.APPLIED, f"Verified: {text}", confirmation_text=text,
+                                   verification="confirmed", evidence=evidence, submit_attempted=True)
+            app.verification_state = "uncertain"
+            reason = ("Submitted - confirmation not verified (re-checked: still no evidence on "
+                      + (final_url[:120] or adapter.display_name) + ")")
+            app.manual_action_reason = reason
+            set_status(s, job, JobStatus.MANUAL_ACTION_REQUIRED, reason[:1000])
+            add_event(s, job.id, "result_manual_action_required", reason, level="warning", application_id=app_id,
+                      run_id=self.run_id)
+            self.stats["verification_uncertain"] += 1
+        return ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED, reason, verification="uncertain", evidence=evidence,
+                           submit_attempted=True)
+
     async def apply_job(self, job_id: int, adapter: PortalAdapter, posting: JobPosting) -> ApplyResult:
         profile = get_profile_store().load()
         self.profile = profile
@@ -356,17 +602,43 @@ class Orchestrator:
         with session_scope() as s:
             job = s.get(Job, job_id)
             assert job is not None
-            category = (job.match_details or {}).get("category", "frontend")
+            details = job.match_details or {}
+            category = details.get("resume_category") or details.get("category", "frontend")
             resume = get_resume(profile, job.resume_id) or select_resume(profile, category, job.skills or [])
             if resume is not None and not resume.absolute_path.is_file():
                 resume = select_resume(profile, category, job.skills or [])
-            app = start_application(s, job, self.mode, resume_id=resume.id if resume else None,
-                                    resume_path=str(resume.absolute_path) if resume else None)
-            app_id = app.id
+            previous = job.application
+            if previous is not None and previous.verify_requested:
+                verify_only = True
+            else:
+                verify_only = False
+            resume_url = ""
+            if (previous is not None and previous.resume_url and previous.apply_target == "external"
+                    and not previous.submit_attempted):
+                resume_url = previous.resume_url
+            elif _unfinished_elsewhere(job):
+                # An application that moved to a company site and was not sent continues there. Going back through the
+                # portal would end it: once its company-site link has been opened, the portal shows the job as
+                # "Applied" - which says nothing about the application on the other site.
+                resume_url = previous.final_url
+            if verify_only:
+                app_id = previous.id
+            else:
+                app = start_application(s, job, self.mode, resume_id=resume.id if resume else None,
+                                        resume_path=str(resume.absolute_path) if resume else None)
+                app_id = app.id
+        if verify_only:
+            return await self.verify_submission(job_id, app_id, adapter, posting)
+        with session_scope() as s:
+            job = s.get(Job, job_id)
+            assert job is not None
             add_event(s, job.id, "apply_started", f"Applying ({self.mode.value}) with resume "
-                                                  f"'{resume.id if resume else 'none'}'", application_id=app_id,
-                      run_id=self.run_id)
+                                                  f"'{resume.id if resume else 'none'}'"
+                      + (" - continuing on the company site where it stopped" if resume_url else ""),
+                      application_id=app_id, run_id=self.run_id)
         self.control.activity(f"Applying: {posting.title} @ {posting.company}")
+        self.control.live(job_id=job_id, step=f"Opening the application: {posting.title} @ {posting.company}",
+                          url=resume_url or posting.url, phase="applying")
 
         async def log_event(type_: str, message: str, level: str = "info", data: dict | None = None) -> None:
             self._event(job_id, type_, message, level=level, application_id=app_id, **(data or {}))
@@ -383,18 +655,44 @@ class Orchestrator:
                     a.last_step = "submit_clicked"
                 add_event(s, job_id, "submit", "Submitting application", application_id=app_id, run_id=self.run_id)
 
+        async def on_step(description: str, url: str) -> None:
+            self.control.live(step=description, url=url or None)
+            with session_scope() as s:
+                a = s.get(Application, app_id)
+                if a is not None:
+                    a.steps = (a.steps or 0) + 1
+                    a.last_step = description[:128]
+
+        async def remember(question: str, answer: str) -> None:
+            with session_scope() as s:
+                remember_answer(s, question, answer, company=posting.company, portal=posting.portal,
+                                title=posting.title)
+            self._event(job_id, "answer_saved", f"Saved your answer for future forms: {question[:120]}",
+                        application_id=app_id)
+
         blockers = [i.message for i in blocking_issues(profile)]
         ctx = ApplyContext(
             engine=self.engine, profile=profile,
             answerer=Answerer(profile, self.assistant, memory_lookup=memory_lookup_fn()),
             mode=self.mode, job=posting, resume_path=resume.absolute_path if resume else None,
             gate=DBHumanGate(self.control, job_id, app_id), log_event=log_event, record_answer=on_answer,
-            on_submit_attempt=on_submit, submit_blockers=blockers,
+            on_submit_attempt=on_submit, submit_blockers=blockers, on_step=on_step, remember=remember,
         )
+        await self.engine.fresh_page()  # application-scoped tab: closed (with its renderer) at the next boundary
         main_page = self.engine.page
         external_page = None
         try:
-            result = await adapter.apply(posting, ctx)
+            if resume_url:
+                result = ApplyResult(ApplyOutcome.EXTERNAL, "Continue the parked application",
+                                     external_url=resume_url)
+            elif blockers and self.mode != AgentMode.DRY_RUN:
+                # name / email / phone / resume missing: never start filling forms with gaps
+                await ctx.event("blocked", "Profile incomplete - not applying: " + "; ".join(blockers), level="warning")
+                result = ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED,
+                                     "Profile incomplete - complete config/profile.json first: " + "; ".join(blockers))
+            else:
+                await self._resources("before", application=self.stats["apply_attempts"], job=job_id)
+                result = await adapter.apply(posting, ctx)
             if result.outcome == ApplyOutcome.EXTERNAL:
                 with session_scope() as s:
                     a = s.get(Application, app_id)
@@ -404,8 +702,9 @@ class Orchestrator:
                     j = s.get(Job, job_id)
                     if j is not None:
                         j.apply_type = "external"
-                        j.external_url = result.external_url
-                self._event(job_id, "external", f"Redirected to {result.external_url}", application_id=app_id)
+                        j.external_url = j.external_url or result.external_url
+                self._event(job_id, "external", f"Application continues on {result.external_url}",
+                            application_id=app_id)
                 external_page = result.external_page
                 if external_page is None and result.external_url:
                     external_page = await self.engine.new_page()
@@ -413,6 +712,7 @@ class Orchestrator:
                 if external_page is None:
                     result = ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED, "External application link missing")
                 else:
+                    self.control.live(url=external_page.url)
                     result = await apply_external(self.engine, external_page, ctx)
         except StopRequested:
             self._finish_interrupted(job_id, app_id)
@@ -426,19 +726,144 @@ class Orchestrator:
             shot = await self._safe_capture(f"apply-{job_id}")
             result = ApplyResult(ApplyOutcome.FAILED, f"{exc.__class__.__name__}: {exc}", screenshot=shot)
         finally:
-            if external_page is not None and external_page is not main_page:
-                try:
-                    if not external_page.is_closed():
-                        await external_page.close()
-                except Exception:
-                    pass
+            for p in list(self.engine.context.pages) if self.engine.alive else []:
+                if p is not main_page and not p.is_closed():
+                    try:
+                        await p.close()  # external tabs: their result (and resume point) is recorded
+                    except Exception:
+                        pass
             try:
                 if not main_page.is_closed():
                     self.engine.use_page(main_page)
+                elif self.engine.alive:  # the site closed our tab: the run continues with exactly one live tab
+                    await self.engine.ensure_alive()
+                    self._event(job_id, "tab_closed_by_site", "The page closed its own tab - a new tab was opened",
+                                level="warning")
             except Exception:
                 pass
+        if (result.outcome == ApplyOutcome.MANUAL_ACTION_REQUIRED and result.verification == "uncertain"
+                and result.submit_attempted and external_page is None and not resume_url):
+            result = await self._portal_recheck(job_id, app_id, adapter, posting, result)
         self._finalize(job_id, app_id, result)
+        await self._resources("after", application=self.stats["apply_attempts"], job=job_id)
         return result
+
+    async def _portal_recheck(self, job_id: int, app_id: int, adapter: PortalAdapter, posting: JobPosting,
+                              result: ApplyResult) -> ApplyResult:
+        """A submit on the portal itself ended without a readable confirmation (the dialog closed with the tab, the
+        renderer crashed...): the portal's own job page is its record. Read once - nothing is filled or submitted."""
+        try:
+            await self.engine.fresh_page()
+            details = await adapter.fetch_details(posting)
+        except Exception as exc:  # noqa: BLE001 - a re-check never breaks the run
+            log.info("portal re-check of job %s failed: %s", job_id, exc)
+            return result
+        if not details.already_applied:
+            result.evidence = list(result.evidence or []) + [f"portal_recheck: {adapter.display_name} does not show "
+                                                             "the job as applied"]
+            return result
+        text = f"{adapter.display_name} shows this job as applied (job page re-read after the submit)"
+        self._event(job_id, "verified", text, application_id=app_id)
+        return ApplyResult(ApplyOutcome.APPLIED, text, confirmation_text=text, submit_attempted=True,
+                           verification="confirmed", evidence=list(result.evidence or []) + [f"portal_status: {text}"])
+
+    async def _resources(self, phase: str, **tags):
+        """[RESOURCE] sample (pages, Chromium processes / memory footprint, the AI model, listeners, tasks, and the
+        machine's own memory state) - see browser/resources.py."""
+        from app.browser.resources import log_sample
+
+        def record(sample, t):
+            with session_scope() as s:
+                add_event(s, t.get("job"), "resource", sample.line(**t), run_id=self.run_id, data={**sample.as_dict(), **t})
+
+        ai_url = self.assistant.provider.base_url if self.assistant is not None and self.assistant.provider.enabled else ""
+        sample = await log_sample(self.engine, record=record, ai_url=ai_url, run=self.run_id, phase=phase, **tags)
+        self.last_sample = sample or self.last_sample
+        return sample
+
+    async def _memory_blocked(self, left: int = 0) -> bool:
+        """True when the run must not start more browser work for lack of memory (said once in the run log)."""
+        if self.memory_stop:
+            return True
+        short = await self._memory_gate()
+        if not short:
+            return False
+        self.memory_stop = short
+        self.stats["memory_stop"] = 1
+        kept = f" {left} job(s) stay queued for the next run." if left else ""
+        self._event(None, "memory_stop", f"Stopped applying: the Mac is out of memory ({short}).{kept} Close other apps "
+                    "or free disk space, then start again.", level="error")
+        return True
+
+    async def _memory_gate(self) -> str:
+        """Before an application: is the machine able to take it? '' = go on.
+
+        * memory under pressure -> go on without the local AI (its model needs ~3 GB) and say so once;
+        * memory exhausted -> wait (bounded) for it to recover, then stop applying: the reason is returned and the
+          remaining jobs stay queued. Nothing is killed: only you decide what to close."""
+        from app.browser.resources import memory_state, system_memory
+
+        from app.config import get_settings
+
+        settings = get_settings()
+        if not settings.memory_guard:
+            return ""
+        provider = self.assistant.provider if self.assistant is not None else None
+        waited = 0.0
+        while True:
+            memory = await asyncio.to_thread(system_memory)
+            state, why = memory_state(memory)
+            if state != self._memory_state:
+                self._memory_state = state
+                if state == "warn":
+                    self._event(None, "memory_warning", f"Low on memory: {why}. Continuing without the local AI model "
+                                "(it needs about 3 GB) until this clears - written answers and unknown pages are left "
+                                "for you meanwhile.", level="warning")
+                elif state == "ok" and self.stats["memory_warnings"]:
+                    self._event(None, "memory_ok", "Memory pressure has cleared - the local AI is used again")
+                if state != "ok":
+                    self.stats["memory_warnings"] += 1
+            if provider is not None:
+                no_room = await self._no_room_for_model(memory, provider) if state == "ok" else ""
+                if state == "ok" and not no_room:
+                    provider.resume()
+                else:
+                    provider.pause(f"the Mac is low on memory ({why or no_room})")
+                    if state != "ok":
+                        await provider.unload()
+            if state != "critical":
+                return ""
+            if waited == 0:
+                self._event(None, "memory_critical", f"Out of memory: {why}. Waiting up to {settings.memory_wait_s} s "
+                            "for it to recover before the next application (nothing is closed for you).", level="warning")
+                self.control.live(step=f"Waiting for memory: {why}"[:200])
+            if waited >= settings.memory_wait_s:
+                return why
+            await self._sleep(15)
+            waited += 15
+
+    async def _no_room_for_model(self, memory: Any, provider: Any) -> str:
+        """'' when the local model may be used; otherwise why not. Loading it takes about 3 GB at once: with less than
+        that (plus the warning margin) left before the Mac runs out, the load itself causes the shortage - run #42
+        started with 2.9 GB of headroom, loaded the model for job analysis and pushed macOS into adding two swap
+        files within minutes. A model that is already in memory costs nothing more and stays in use."""
+        from app.browser.resources import SWAP_HEADROOM_WARN_MB, ai_model_mb
+
+        from app.config import get_settings
+
+        need = get_settings().ai_model_memory_mb
+        if need <= 0 or memory.swap_headroom_mb >= SWAP_HEADROOM_WARN_MB + need:
+            return ""
+        if await asyncio.to_thread(ai_model_mb, getattr(provider, "base_url", "")) > 0:
+            return ""
+        why = (f"only {memory.swap_headroom_mb / 1024:.1f} GB of memory headroom left - loading the local AI model "
+               f"needs about {need / 1024:.1f} GB")
+        if not self.stats["ai_no_room"]:
+            self.stats["ai_no_room"] = 1
+            self._event(None, "memory_warning", f"Not loading the local AI model: {why}. Rules and your saved answers "
+                        "are used; written answers and unknown pages are left for you until memory is freed.",
+                        level="warning")
+        return why
 
     def _finish_interrupted(self, job_id: int, app_id: int) -> None:
         with session_scope() as s:
@@ -462,11 +887,17 @@ class Orchestrator:
             ApplyOutcome.ALREADY_APPLIED: JobStatus.ALREADY_APPLIED,
             ApplyOutcome.REJECTED: JobStatus.SKIPPED,
             ApplyOutcome.EXTERNAL: JobStatus.MANUAL_ACTION_REQUIRED,
+            ApplyOutcome.EXPIRED: JobStatus.EXPIRED,
         }
         status = mapping[result.outcome]
-        if status == JobStatus.APPLIED and not result.confirmation_text:
-            status = JobStatus.MANUAL_ACTION_REQUIRED  # never claim success without a confirmation
-            result.message = "Submitted but no confirmation captured - please verify"
+        if result.portal_limit and status == JobStatus.MANUAL_ACTION_REQUIRED and not result.submit_attempted:
+            status = JobStatus.QUEUED
+            result.message = (f"Kept in the queue: the portal is not accepting more applications right now "
+                              f"({result.portal_limit[:200]}) - will be applied on a later run")
+        if status == JobStatus.APPLIED and (not result.confirmation_text or result.verification in {"uncertain", "failed"}):
+            status = JobStatus.MANUAL_ACTION_REQUIRED  # never claim success without genuine evidence
+            result.message = "Submitted - confirmation not verified (no confirmation captured)"
+            result.verification = "uncertain"
         with session_scope() as s:
             job = s.get(Job, job_id)
             app = s.get(Application, app_id)
@@ -474,8 +905,13 @@ class Orchestrator:
             app.finished_at = utcnow()
             app.ats_platform = result.ats or app.ats_platform
             app.final_url = result.external_url or app.final_url or job.url
-            app.submit_attempted = app.submit_attempted or result.submit_attempted
+            app.submit_attempted = (app.submit_attempted or result.submit_attempted) and not result.nothing_sent
             app.last_step = result.outcome.value.lower()
+            app.resume_url = (result.resume_url or "") if status == JobStatus.MANUAL_ACTION_REQUIRED else ""
+            if result.verification or status == JobStatus.APPLIED:
+                app.verification_state = result.verification or "confirmed"
+                app.verification_evidence = list(result.evidence)[:12]
+                app.verification_checked_at = utcnow()
             reason = result.message
             if status == JobStatus.APPLIED:
                 app.confirmed = True
@@ -493,17 +929,37 @@ class Orchestrator:
             add_event(s, job.id, f"result_{status.value.lower()}", reason or status.value, level=level,
                       application_id=app_id, run_id=self.run_id, screenshot=result.screenshot,
                       data={"confirmation": result.confirmation_text, "ats": result.ats,
-                            "unresolved": result.unresolved})
+                            "unresolved": result.unresolved, "url": result.external_url})
         self.stats[f"result_{status.value.lower()}"] += 1
+        self.control.live(step=f"{status.value.replace('_', ' ').title()}: {result.message[:200]}")
         log.info("Job %s -> %s (%s)", job_id, status.value, result.message)
+
+
+def _unfinished_elsewhere(job: Job) -> bool:
+    """Our own application for this job moved to another site (a company career page / ATS) and nothing was sent
+    there. The portal's "Applied" badge is then no evidence: it appears as soon as the company-site link is opened."""
+    from urllib.parse import urlparse
+
+    from app.security import is_web_url
+
+    app = job.application
+    if app is None or app.confirmed or app.submit_attempted:
+        return False
+    if app.apply_target != "external" and job.apply_type != "external":
+        return False  # (apply_target is reset when an attempt starts; the job itself says where it is applied to)
+    if not is_web_url(app.final_url):
+        return False
+    there, here = urlparse(app.final_url).netloc.lower(), urlparse(job.url or "").netloc.lower()
+    return bool(there) and there != here and not there.endswith("." + here.removeprefix("www."))
 
 
 _SUMMARY_PARTS = [
     ("result_applied", "applied"), ("result_dry_run", "dry-run"), ("result_manual_action_required", "need you"),
     ("result_failed", "failed"), ("relevant", "relevant"), ("review_pending", "to decide"), ("skipped", "skipped"),
-    ("already_applied", "already applied"), ("duplicates", "duplicates"), ("deferred", "deferred by limits"),
-    ("new_jobs", "new jobs"), ("login_required", "portal(s) needing login"), ("job_errors", "job errors"),
-    ("recovered", "recovered"),
+    ("already_applied", "already applied"), ("duplicates", "duplicates"), ("expired", "expired"),
+    ("result_expired", "closed"), ("deferred", "deferred by limits"), ("new_jobs", "new jobs"),
+    ("login_required", "portal(s) needing login"), ("job_errors", "job errors"), ("recovered", "recovered"),
+    ("waiting_for_profile", "waiting for your profile"),
 ]
 
 
@@ -512,6 +968,16 @@ def _summary(stats: Counter[str]) -> str:
     if stats.get("discovered"):
         parts.append(f"{stats['discovered']} listings scanned")
     return ", ".join(parts) or "nothing to do"
+
+
+def _internet_available() -> bool:
+    for host in ("www.google.com", "www.naukri.com", "1.1.1.1"):
+        try:
+            socket.create_connection((host, 443), timeout=4).close()
+            return True
+        except OSError:
+            continue
+    return False
 
 
 def _posting_from_job(job: Job) -> JobPosting:

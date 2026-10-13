@@ -1,0 +1,70 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Apply - Senior Staff Engineer (mock SmartRecruiters)</title></head><body>
+<!-- jobs.smartrecruiters.com (runs #26-#29, Nagarro): what stopped a real application, step by step
+     1. a profile-picture upload above the form took the resume PDF ("this file format is not supported");
+     2. "City" is a typeahead whose suggestions are plain elements that arrive late; unselected text is thrown away;
+     3. the second step is drawn about 1.5 s after "Next" - it was read while empty and its Submit button pressed:
+        four questions and the required consent box were never seen ("Value is required"). -->
+<oc-oneclick-form style="display:block">
+ <section id="p1"><h2>Personal information</h2>
+  <div class="avatar"><input type="file" id="avatar"></div><p class="error-message" id="averr" hidden></p>
+  <spl-input data-label="First name" data-id="first-name-input"></spl-input>
+  <spl-input data-label="Last name" data-id="last-name-input"></spl-input>
+  <spl-input data-label="Email" data-id="email-input"></spl-input>
+  <spl-city data-label="City" data-id="city-input"></spl-city>
+  <spl-input data-label="Phone number" data-id="phone-number-input"></spl-input>
+  <div><label for="resume">Resume</label><input type="file" id="resume" data-test="resume-upload"></div>
+ </section>
+ <section id="p2" hidden></section>
+ <div id="confirm" hidden data-test="confirmation"><h2>Thank you for your application</h2></div>
+ <div id="err" class="error-message" hidden></div>
+ <button data-test="footer-next" id="next">Next</button>
+ <button data-test="footer-submit" id="submit" hidden>Submit</button>
+</oc-oneclick-form>
+<script>
+window.SUBMITS = 0; window.SENT = null;
+const PLACES = ['Bengaluru, Karnataka, India', 'Bengaluru Rural, Karnataka, India', 'Gurugram, Haryana, India', 'Pune, Maharashtra, India'];
+customElements.define('spl-input', class extends HTMLElement { connectedCallback() { const r = this.attachShadow({mode: 'open'});
+  r.innerHTML = '<label for="' + this.dataset.id + '">' + this.dataset.label + (this.dataset.optional ? '' : ' *') + '</label><input id="' + this.dataset.id + '"' + (this.dataset.optional ? '' : ' required') + '>'; }
+  get value() { return this.shadowRoot.querySelector('input').value; } });
+customElements.define('spl-city', class extends HTMLElement { connectedCallback() { const r = this.attachShadow({mode: 'open'}); this.chosen = '';
+  r.innerHTML = (this.dataset.nolabel ? '' : '<label for="' + this.dataset.id + '">' + this.dataset.label + ' *</label>') + '<input id="' + this.dataset.id + '" name="' + this.dataset.id + '" role="combobox" aria-autocomplete="list" autocomplete="off"><div class="dd" hidden></div>';
+  const input = r.querySelector('input'), dd = r.querySelector('.dd'); let timer = 0;
+  input.addEventListener('input', () => { this.chosen = ''; dd.hidden = true; clearTimeout(timer); const q = input.value.trim().toLowerCase(); if (q.length < 2) return;
+    timer = setTimeout(() => { dd.innerHTML = PLACES.filter(p => p.toLowerCase().includes(q)).map(p => '<div class="dd-item"><span>' + p + '</span></div>').join('');
+      dd.hidden = false; dd.querySelectorAll('.dd-item').forEach(it => it.addEventListener('mousedown', () => { input.value = it.textContent; this.chosen = it.textContent; dd.hidden = true; })); }, 1200); });
+  input.addEventListener('blur', () => setTimeout(() => { if (!this.chosen) input.value = ''; dd.hidden = true; }, 200)); } });
+customElements.define('spl-bare', class extends HTMLElement { connectedCallback() { const r = this.attachShadow({mode: 'open'});
+  r.innerHTML = '<input id="' + this.dataset.id + '"' + (this.dataset.type ? ' type="' + this.dataset.type + '"' : '') + '>'; } get value() { return this.shadowRoot.querySelector('input').value; } });
+customElements.define('spl-number', class extends HTMLElement { connectedCallback() { const r = this.attachShadow({mode: 'open'});
+  r.innerHTML = '<label><slot></slot></label><span class="unit">INR</span><spl-bare data-id="' + this.id + '" data-type="number"></spl-bare>'; } });
+// the consent box as it really is: a real checkbox whose own label holds only the "*" - the sentence is slotted in
+customElements.define('spl-check', class extends HTMLElement { connectedCallback() { const r = this.attachShadow({mode: 'open'});
+  r.innerHTML = '<input type="checkbox" id="box" required aria-labelledby="box-label" style="position:absolute;opacity:0;width:0;height:0;margin:0">' +
+                '<span class="styled-box" style="display:inline-block;width:16px;height:16px;border:1px solid #c00"></span><label id="box-label" for="box"><slot></slot><span>*</span></label>'; }
+  get checked() { return this.shadowRoot.querySelector('input').checked; } });
+const $ = (id) => document.getElementById(id); const fail = (msg) => { $('err').textContent = msg; $('err').hidden = false; };
+$('avatar').addEventListener('change', () => { const f = $('avatar').files[0]; const bad = f && !/\.(bmp|gif|jfif|jpe?g|png|tiff?|webp)$/i.test(f.name);
+  $('averr').hidden = !bad; $('averr').textContent = bad ? 'Unfortunately, this file format is not supported. Please try out one of the following: .BMP,.GIF,.JFIF,.JPEG,.JPG,.PNG,.TIF,.TIFF,.WEBP' : ''; });
+$('next').onclick = () => {
+  if (!$('averr').hidden) return fail('Personal information Fields marked with * are required.');
+  if (![...document.querySelectorAll('#p1 spl-input')].every(e => e.value.trim())) return fail('Personal information Fields marked with * are required.');
+  if (!document.querySelector('spl-city').chosen) return fail('Please provide your place of residence');
+  if (!$('resume').files.length) return fail('Please attach your resume');
+  $('err').hidden = true; $('p1').hidden = true; $('next').hidden = true; $('submit').hidden = false; $('p2').hidden = false;
+  setTimeout(() => {   // the step's questions are drawn after its Submit button is already there
+    // as on the real page: the question text is outside the component that holds the box (which only has an id)
+    const q = (text, id, extra) => '<div class="field"><label class="q-label">' + text + '</label><spl-bare data-id="' + id + '"></spl-bare>' + (extra || '') + '</div>';
+    $('p2').innerHTML = '<h2>Preliminary questions</h2>' +
+      '<div class="field"><spl-number id="question_bfc6ed48-cf25-4f25-87e1-51151abd1334" aria-label="Salary in INR">What is your current compensation?</spl-number></div>' +
+      q('What are your salary expectations?', 'question_f8ec49a0-1834-4d34-b58a-eefe00ed1ca7', '<span>0/200</span>') +
+      '<div class="field"><label class="q-label">In which city would you prefer to work?</label><spl-city data-nolabel="1" data-id="question_ccd49541-f681-452e-bef1-008408325e92"></spl-city></div>' +
+      q('What is the lead time to join? - Please mention in days', 'question_7573b90b-da21-419d-964c-807dbba8c8a5', '<span>0/200</span>') +
+      '<p>Here you can find details of our privacy notice.</p>' +
+      '<spl-check id="consent">You declare that you have read and agree to the privacy notice of MockCo.</spl-check>'; }, 1500); };
+$('submit').onclick = () => { window.SUBMITS++;
+  if (!$('consent') || !$('consent').checked) return fail('Value is required');
+  const deep = (e) => e.shadowRoot.querySelector('input') || deep(e.shadowRoot.querySelector('spl-bare'));
+  const boxes = [...document.querySelectorAll('#p2 .field > spl-number, #p2 .field > spl-bare, #p2 .field > spl-city')].map(e => deep(e).value);
+  window.SENT = { avatar: $('avatar').files.length, resume: $('resume').files[0].name, comp: boxes[0], expect: boxes[1], city: boxes[2], lead: boxes[3] };
+  $('err').hidden = true; $('p2').hidden = true; $('submit').hidden = true; $('confirm').hidden = false; };
+</script></body></html>

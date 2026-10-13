@@ -1,0 +1,28 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Easy Apply - radios</title>
+<style>.r input{opacity:0;pointer-events:none;width:0;height:0;margin:0}.r{cursor:pointer;padding:2px}</style></head><body>
+<!-- LinkedIn Easy Apply (2026, run #18): hidden inputs inside div[role=radio] cards; selecting re-renders the whole
+     group - every <input> is replaced by a new element with a new id (and without our data attributes) -->
+<dialog open data-testid="dialog" id="dlg">
+ <div><p>Have you completed the following level of education: Bachelor's Degree?*</p>
+  <fieldset role="radiogroup" id="g1" data-q="Have you completed the following level of education: Bachelor's Degree?"></fieldset></div>
+ <div><p>Are you comfortable for Hybrid in Bangalore location?*</p>
+  <fieldset role="radiogroup" id="g2" data-q="Are you comfortable for Hybrid in Bangalore location?"></fieldset></div>
+</dialog>
+<script>
+  let seq = 0;
+  const state = { g1: null, g2: null };
+  function render(gid) {
+    const g = document.getElementById(gid);
+    g.innerHTML = ['Yes', 'No'].map(v => {
+      const id = '_r_' + (++seq) + '_';
+      const on = state[gid] === v;
+      return '<div role="radio" tabindex="0" class="r" aria-label="' + g.dataset.q + '" aria-checked="' + on + '">' +
+        '<div><div><input id="' + id + '" type="radio" name="radio-group-' + gid + '"' + (on ? ' checked' : '') + '>' +
+        '<label for="' + id + '"></label></div><div><p>' + v + '</p></div></div></div>';
+    }).join('');
+    g.querySelectorAll('[role=radio]').forEach((card, i) => card.addEventListener('click', (e) => {
+      e.preventDefault(); state[gid] = ['Yes', 'No'][i]; setTimeout(() => render(gid), 30);
+    }));
+  }
+  render('g1'); render('g2');
+</script></body></html>

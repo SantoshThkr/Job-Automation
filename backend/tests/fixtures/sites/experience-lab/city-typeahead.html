@@ -1,0 +1,42 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Apply - Senior Staff Engineer | CityLab</title></head><body>
+<!-- jobs.smartrecruiters.com (run #26, twice): "City" is a text box inside a web component; its suggestions come
+     from the server after typing. The assistant gave up after 0.7 s and asked the user for a city the profile has. -->
+<h1>Apply for Senior Staff Engineer, Frontend</h1>
+<form id="app">
+ <label for="nm">Full name *</label><input id="nm" name="name" required>
+ <city-box></city-box>
+ <button type="submit">Submit application</button>
+</form><div id="out"></div>
+<script>
+  window.CITY = ''; window.SUBMITS = 0; window.LOOKUPS = 0;
+  const DELAY = Number(new URLSearchParams(location.search).get('delay') || 1800);
+  // ?markup=plain: the list is drawn as plain elements (no role, no <li>), as web-component design systems do
+  const PLAIN = new URLSearchParams(location.search).get('markup') === 'plain';
+  const PLACES = ['Bengaluru, Karnataka, India', 'Bengaluru Rural, Karnataka, India', 'Pune, Maharashtra, India', 'Mumbai, Maharashtra, India'];
+  customElements.define('city-box', class extends HTMLElement {
+    connectedCallback() {
+      const root = this.attachShadow({ mode: 'open' });
+      root.innerHTML = '<label for="city">City *</label><input id="city" role="combobox" aria-autocomplete="list" aria-controls="list" autocomplete="off" required>' +
+                       '<div id="list" role="listbox" hidden></div><p class="error-message" id="err" hidden></p>';
+      const input = root.getElementById('city'), list = root.getElementById('list'); let timer = 0;
+      input.addEventListener('input', () => { window.CITY = ''; list.hidden = true; clearTimeout(timer);
+        const q = input.value.trim().toLowerCase(); if (q.length < 2) return;
+        timer = setTimeout(() => { window.LOOKUPS++;   // the answer of the location service
+          const hits = PLACES.filter(p => p.toLowerCase().includes(q));
+          const item = PLAIN ? (p) => '<div class="dd-item"><span>' + p + '</span></div>' : (p) => '<li role="option">' + p + '</li>';
+          if (PLAIN) list.removeAttribute('role');
+          list.innerHTML = hits.length ? hits.map(item).join('') : item('No results found');
+          list.hidden = false;
+          list.querySelectorAll(PLAIN ? '.dd-item' : 'li').forEach(li => li.addEventListener('click', () => {
+            if (li.textContent.startsWith('No results')) return;
+            input.value = li.textContent; window.CITY = li.textContent; list.hidden = true; })); }, DELAY); });
+      // like the real control: text that was typed but not chosen from the list is thrown away
+      input.addEventListener('blur', () => setTimeout(() => { if (!window.CITY) input.value = ''; }, 250));
+    }
+    refuse(msg) { const e = this.shadowRoot.getElementById('err'); e.textContent = msg; e.hidden = false; }
+  });
+  document.getElementById('app').addEventListener('submit', (e) => { e.preventDefault();
+    if (!window.CITY) { document.querySelector('city-box').refuse('Please select a city from the list'); return; }
+    window.SUBMITS++; document.getElementById('app').hidden = true;
+    document.getElementById('out').innerHTML = '<div role="status">Your application has been received.</div>'; });
+</script></body></html>

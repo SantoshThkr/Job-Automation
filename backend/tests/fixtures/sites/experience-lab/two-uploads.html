@@ -1,0 +1,32 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Apply - Senior Staff Engineer | UploadLab</title>
+<style>.avatar input{opacity:0;width:120px;height:120px;position:absolute} .avatar{width:120px;height:120px;border-radius:60px;background:#ddd;position:relative}</style></head><body>
+<!-- jobs.smartrecruiters.com (run #27): a profile-picture upload sits above the form. The resume PDF was put into it
+     ("Unfortunately, this file format is not supported. Please try out one of the following: .BMP,.GIF,...") and the
+     real resume upload further down was then skipped as "already provided". -->
+<h1>Apply for Senior Staff Engineer</h1>
+<form id="app">
+ <div class="avatar" id="avatar-box"></div><p class="error-message" id="averr" hidden></p>
+ <label for="nm">First name *</label><input id="nm" name="firstName" required>
+ <label for="em">Email *</label><input id="em" name="email" type="email" required>
+ <h2>Resume</h2>
+ <label for="cv">Resume *</label><input id="cv" name="resume" type="file" required>
+ <button type="submit">Submit application</button>
+</form><div id="out"></div>
+<script>
+  window.SUBMITS = 0;
+  const mode = new URLSearchParams(location.search).get('avatar') || 'accept';
+  // 'accept': the picture upload says what it takes; 'bare': it says nothing and refuses a document in the site's words
+  document.getElementById('avatar-box').innerHTML = mode === 'accept'
+    ? '<input type="file" id="avatar" accept="image/png, image/jpeg, .gif" aria-label="Upload profile picture">'
+    : '<input type="file" id="avatar">';
+  const avatar = document.getElementById('avatar'), err = document.getElementById('averr');
+  avatar.addEventListener('change', () => { const f = avatar.files[0];
+    if (f && !/\.(bmp|gif|jfif|jpe?g|png|tiff?|webp)$/i.test(f.name)) { err.hidden = false;
+      err.textContent = 'Unfortunately, this file format is not supported. Please try out one of the following: .BMP,.GIF,.JFIF,.JPEG,.JPG,.PNG,.TIF,.TIFF,.WEBP'; }
+    else { err.hidden = true; err.textContent = ''; } });
+  document.getElementById('app').addEventListener('submit', (e) => { e.preventDefault();
+    if (!err.hidden) return;
+    window.SUBMITS++; window.SENT = { avatar: avatar.files.length, resume: document.getElementById('cv').files.length ? document.getElementById('cv').files[0].name : '' };
+    document.getElementById('app').hidden = true;
+    document.getElementById('out').innerHTML = '<div role="status">Your application has been received.</div>'; });
+</script></body></html>

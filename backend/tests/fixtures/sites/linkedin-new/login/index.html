@@ -1,0 +1,12 @@
+<!doctype html><html><head><meta charset="utf-8"><title>LinkedIn Login, Sign in | LinkedIn</title><script src="/linkedin-new/_common.js"></script></head>
+<body><main><h1>Sign in</h1>
+<p id="expired" hidden>Welcome back. Your session has expired - please sign in again.</p>
+<div><input type="email" id="_R_svvtiejj35656j6_" aria-label="Email or phone"><input type="password" id="_R_5fvtiejj35656j6_" aria-label="Password">
+<button type="button" id="go">Sign in</button></div><a href="#">Sign in with Apple</a> <a href="#">Forgot password?</a> <a href="#">Join now</a></main>
+<script>
+if (hasCookie('li_rm')) document.getElementById('expired').hidden = false;
+document.getElementById('go').onclick = () => {   // LinkedIn asks for a security check after the password
+  const stay = new URLSearchParams(location.search).get('stay') ? '?stay=1' : '';
+  location.href = BASE + '/checkpoint/challenge/' + stay;
+};
+</script></body></html>

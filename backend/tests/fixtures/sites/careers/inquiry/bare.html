@@ -1,0 +1,15 @@
+<!doctype html><html><head><meta charset="utf-8"><title>BareLab - Web products for growing teams</title></head><body>
+<!-- the redirect from the job portal ended on the company's home page: its only form says nothing about applying -->
+<h1>We build web products</h1>
+<section><h2>What we do</h2><p>Design, engineering and support for teams of every size.</p></section>
+<form id="lead">
+ <label for="n">Your Name</label><input id="n" name="fullname" required>
+ <label for="e">Your Email</label><input id="e" name="email" type="email" required>
+ <label for="m">Your Message</label><textarea id="m" name="message"></textarea>
+ <button type="submit">Send</button>
+</form><div id="out"></div>
+<script>
+  window.SUBMITS = 0;
+  document.querySelector('form').addEventListener('submit', (e) => { e.preventDefault(); window.SUBMITS++;
+    document.getElementById('out').innerHTML = '<div role="status">Thank you for your message. It has been sent.</div>'; });
+</script></body></html>

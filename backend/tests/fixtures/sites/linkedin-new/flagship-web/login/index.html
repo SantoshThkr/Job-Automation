@@ -1,0 +1,9 @@
+<!doctype html><html><head><meta charset="utf-8"><title>LinkedIn Login, Sign in | LinkedIn</title><script src="/linkedin-new/_common.js"></script></head>
+<body><main><h1>Sign in</h1><div><input type="email" id="_R_a1_"><input type="password" id="_R_b2_"><button type="button">Sign in</button></div></main>
+<script>
+const p = new URLSearchParams(location.search);
+if (p.get('vcd')) {                       // verification finished: LinkedIn creates the session ...
+  document.cookie = 'li_at=AQEDAS-mock-session; path=/; max-age=31536000';
+  if (!p.get('stay')) setTimeout(() => location.replace(BASE + '/feed/'), 1500);   // ... and redirects to the feed
+}
+</script></body></html>

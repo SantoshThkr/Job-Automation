@@ -7,28 +7,36 @@ import os
 import subprocess
 import sys
 import threading
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.serializers import agent_dict
+from app.api.serializers import agent_dict, run_dict
 from app.config import PROJECT_ROOT, get_settings
 from app.db import get_db
 from app.engine.control import agent_is_alive
 from app.engine.recorder import add_event
-from app.models import ActualState, AgentMode, AgentState, DesiredState, utcnow
+from app.models import ActualState, AgentMode, AgentState, DesiredState, Job, Run, utcnow
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
 VALID_PORTALS = {"naukri", "linkedin", "instahyre"}
+Name = Annotated[str, StringConstraints(max_length=32)]  # a mode / portal name; checked against the known ones
+
+
+class Strict(BaseModel):
+    """Request bodies accept the documented fields only."""
+    model_config = ConfigDict(extra="forbid")
 
 
 def _state(db: Session) -> dict[str, Any]:
     st = AgentState.get(db)
-    return agent_dict(st, agent_is_alive(st))
+    current = db.get(Job, st.current_job_id) if st.current_job_id else None
+    return agent_dict(st, agent_is_alive(st), current)
 
 
 @router.get("")
@@ -36,10 +44,10 @@ def get_agent(db: Session = Depends(get_db)) -> dict[str, Any]:
     return _state(db)
 
 
-class StartRequest(BaseModel):
-    mode: str | None = None
-    portals: list[str] | None = None
-    repeat_minutes: int | None = None
+class StartRequest(Strict):
+    mode: Name | None = None
+    portals: Annotated[list[Name], Field(max_length=8)] | None = None
+    repeat_minutes: Annotated[int, Field(ge=0, le=24 * 60)] | None = None
 
 
 def spawn_agent() -> int:
@@ -70,8 +78,8 @@ def start(body: StartRequest, db: Session = Depends(get_db)) -> dict[str, Any]:
     if body.portals is not None:
         bad = set(body.portals) - VALID_PORTALS
         if bad:
-            raise HTTPException(400, f"unknown portals {sorted(bad)}")
-        st.portals = body.portals
+            raise HTTPException(400, "unknown portal(s); use naukri, linkedin, instahyre")
+        st.portals = list(dict.fromkeys(body.portals))
     if body.repeat_minutes is not None:
         st.repeat_minutes = max(0, body.repeat_minutes)
     st.desired_state = DesiredState.RUNNING
@@ -123,8 +131,8 @@ def stop(db: Session = Depends(get_db)) -> dict[str, Any]:
     return _state(db)
 
 
-class ModeRequest(BaseModel):
-    mode: str
+class ModeRequest(Strict):
+    mode: Name
 
 
 @router.put("/mode")
@@ -137,9 +145,15 @@ def set_mode(body: ModeRequest, db: Session = Depends(get_db)) -> dict[str, Any]
     return _state(db)
 
 
-class GateResponse(BaseModel):
-    response: str  # approve|reject
-    job_id: int | None = None
+GateKey = Annotated[str, StringConstraints(max_length=128)]
+GateAnswer = Annotated[str, StringConstraints(max_length=5000)]
+
+
+class GateResponse(Strict):
+    response: Name  # approve | reject
+    job_id: Annotated[int, Field(ge=1)] | None = None
+    # question id -> your answer (gate kind "questions")
+    answers: Annotated[dict[GateKey, GateAnswer], Field(max_length=100)] | None = None
 
 
 @router.post("/gate")
@@ -151,6 +165,18 @@ def gate(body: GateResponse, db: Session = Depends(get_db)) -> dict[str, Any]:
         raise HTTPException(409, "The agent is not waiting for you right now")
     if body.job_id is not None and st.pending_job_id is not None and body.job_id != st.pending_job_id:
         raise HTTPException(409, "The agent is waiting on a different job")
+    if body.answers is not None:
+        known = {str(q.get("id")) for q in (st.gate_payload or {}).get("questions", [])}
+        unknown = set(body.answers) - known
+        if unknown:
+            raise HTTPException(400, f"Unknown question id(s): {sorted(unknown)}")
+        st.gate_answers = {k: v.strip() for k, v in body.answers.items() if v and v.strip()}
     st.gate_response = body.response
     db.flush()
     return _state(db)
+
+
+@router.get("/runs")
+def runs(limit: int = Query(20, ge=1, le=100), db: Session = Depends(get_db)) -> list[dict[str, Any]]:
+    rows = db.scalars(select(Run).order_by(Run.id.desc()).limit(limit)).all()
+    return [run_dict(r) for r in rows]

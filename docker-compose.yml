@@ -1,18 +1,30 @@
 # Optional. The browser agent must run natively (it opens a real browser window for logins,
 # CAPTCHA and OTP) and the SQLite database is shared with the API, so the API runs natively too:
 #
-#   make api          # terminal 1 (native API on :8000)
+#   make api          # terminal 1 (native API on 127.0.0.1:8000)
 #   docker compose up --build dashboard
 #
 # The dashboard container reaches the native API through host.docker.internal.
+# Nothing here is reachable from other machines: the port is published on 127.0.0.1 only.
 services:
   dashboard:
     build:
       context: ./frontend
-      args:
-        PJA_BACKEND_URL: http://host.docker.internal:8000
+    environment:
+      PJA_BACKEND_URL: http://host.docker.internal:8000
+      # set both here and in .env when you protect the API with a token (required if you ever change the
+      # published address below to something other than 127.0.0.1)
+      PJA_API_TOKEN: ${PJA_API_TOKEN:-}
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /app/.next/cache
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped

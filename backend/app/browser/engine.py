@@ -20,15 +20,20 @@ from typing import Any
 
 from playwright.async_api import (
     BrowserContext,
-    Error as PlaywrightError,
     Frame,
     Locator,
     Page,
     Playwright,
-    TimeoutError as PlaywrightTimeout,
     async_playwright,
 )
+from playwright.async_api import (
+    Error as PlaywrightError,
+)
+from playwright.async_api import (
+    TimeoutError as PlaywrightTimeout,
+)
 
+from app.security import is_web_url
 from app.browser.errors import BrowserCrashed, ElementNotFound, NavigationFailed
 from app.browser.selectors import Target
 from app.config import Settings, get_settings
@@ -38,31 +43,63 @@ log = logging.getLogger(__name__)
 Checkpoint = Callable[[], Awaitable[None]]
 Root = Page | Frame | Locator
 
-CAPTCHA_SELECTORS = [
+# Full-page / pop-up challenges: nothing else can happen until a human solves them.
+CHALLENGE_SELECTORS = [
     "iframe[src*='recaptcha/api2/bframe']",
     "iframe[src*='recaptcha/enterprise/bframe']",
     "iframe[src*='hcaptcha.com'][src*='challenge']",
-    "iframe[title*='challenge' i]",
-    "iframe[src*='challenges.cloudflare.com']",
+    "iframe[title*='hCaptcha challenge' i]", "iframe[title*='challenge' i][src*='hcaptcha']",
+    "iframe[title*='challenge' i]:not([title*='reCAPTCHA' i])",
+    "iframe[src*='challenges.cloudflare.com']:not([src*='turnstile'])",
     "iframe[src*='arkoselabs']",
     "#captcha",
     "#captcha-internal",
     "[data-testid='captcha']",
-    "iframe[title*='reCAPTCHA' i]:not([style*='hidden'])",
 ]
+# Inline "I'm not a robot" widgets inside a form (solved by the human right before submitting).
+# The invisible reCAPTCHA v3 badge (size=invisible) is not a challenge and is ignored.
+CAPTCHA_WIDGET_SELECTORS = [
+    "iframe[title*='reCAPTCHA' i]:not([style*='hidden']):not([src*='size=invisible'])",
+    "iframe[src*='hcaptcha.com'][src*='checkbox']",
+    "iframe[src*='challenges.cloudflare.com'][src*='turnstile']",
+    ".g-recaptcha:not([data-size='invisible'])",
+    ".h-captcha",
+    ".cf-turnstile",
+    # a code / sum to type ("What is 3 + 4?", an image of letters): still a CAPTCHA, still yours
+    "input[name*='captcha' i]:not([type='hidden']):not([name*='response' i])",
+    "input[id*='captcha' i]:not([type='hidden']):not([id*='response' i])",
+]
+CAPTCHA_SELECTORS = CHALLENGE_SELECTORS + CAPTCHA_WIDGET_SELECTORS
+# where a solved inline CAPTCHA leaves its proof (a token the widget writes, or the answer you typed)
+_CAPTCHA_SOLVED_JS = """
+() => [...document.querySelectorAll('textarea[name="g-recaptcha-response"], textarea[name="h-captcha-response"], ' +
+        'input[name="cf-turnstile-response"], input[name*="captcha" i]:not([type="hidden"]), ' +
+        'input[id*="captcha" i]:not([type="hidden"]), .g-recaptcha input[type="checkbox"], .h-captcha input[type="checkbox"]')]
+      .some(e => e.type === 'checkbox' ? e.checked : (e.value || '').trim().length > 0)
+"""
 OTP_SELECTORS = [
     "input[autocomplete='one-time-code']",
     "input[name*='otp' i]",
     "input[id*='otp' i]",
     "input[name*='verification' i][name*='code' i]",
     "input[name='pin'][maxlength]",
+    # one box per digit, named only for screen readers ("Enter verification code digit 1 of six.")
+    "input[aria-label*='verification code' i]",
+    "input[aria-label*='one-time' i]",
+    "input[aria-label*='security code' i]",
+    "input[aria-label*='digit 1' i][maxlength='1']",
 ]
-OTP_TEXT = re.compile(r"enter\s+(?:the\s+)?otp|one[\s-]time\s+password|verification\s+code\s+(?:sent|to)|"
-                      r"we\s+(?:sent|have\s+sent)\s+(?:a|an|the)\s+(?:code|otp)|enter\s+(?:the\s+)?(?:6|4)[\s-]digit", re.I)
-CAPTCHA_TEXT = re.compile(r"verify\s+(?:that\s+)?you\s+are\s+(?:a\s+)?human|i'?m\s+not\s+a\s+robot|"
+OTP_TEXT = re.compile(r"enter\s+(?:the\s+)?otp|one[\s-]time\s+(?:password|pass\s*code|code)|verification\s+code\s+(?:sent|to)|"
+                      r"we\s+(?:sent|have\s+sent|(?:have\s+)?e-?mailed|texted)\s+(?:you\s+)?(?:a|an|the)\s+(?:\w+\s+)?(?:code|otp)|"
+                      r"enter\s+(?:the\s+)?(?:6|4|six|four)[\s-]digit|enter\s+(?:the\s+|your\s+)?(?:verification|security|"
+                      r"confirmation)\s+code", re.I)
+CAPTCHA_TEXT = re.compile(r"verify\s+(?:that\s+)?you\s+are\s+(?:a\s+)?human|"
                           r"security\s+check|unusual\s+(?:activity|traffic)|are\s+you\s+a\s+robot|"
                           r"let'?s\s+do\s+a\s+quick\s+security\s+check", re.I)
+WIDGET_TEXT = re.compile(r"i'?m\s+not\s+a\s+robot", re.I)  # the label of an inline CAPTCHA checkbox
 
+
+CAPTURE_TIMEOUT_S = 8.0  # saving a failed page's source: evidence, never worth waiting on
 
 class BrowserEngine:
     def __init__(self, settings: Settings | None = None, *, headless: bool | None = None,
@@ -84,6 +121,7 @@ class BrowserEngine:
         self._page: Page | None = None
         self._context_closed = False
         self._crashed_pages: set[int] = set()
+        self._watched: set[int] = set()
         self.restarts = 0
 
     # ------------------------------------------------------------ lifecycle
@@ -95,6 +133,9 @@ class BrowserEngine:
             self._pw = await async_playwright().start()
         launch_args = ["--disable-blink-features=AutomationControlled", "--no-first-run",
                        "--no-default-browser-check"]
+        if self.persistent and self.settings.browser_disk_cache_mb > 0:
+            # the profile keeps your sessions; its HTTP cache only needs to be small (it had grown to 650 MB)
+            launch_args.append(f"--disk-cache-size={self.settings.browser_disk_cache_mb * 1048576}")
         common: dict[str, Any] = {
             "headless": self.headless,
             "slow_mo": self.settings.browser_slow_mo_ms or None,
@@ -124,7 +165,11 @@ class BrowserEngine:
         self._context_closed = True
 
     def _watch_page(self, page: Page) -> None:
+        if id(page) in self._watched:
+            return  # use_page() runs for every tab switch: the listener is attached once per page
+        self._watched.add(id(page))
         page.on("crash", lambda p: self._crashed_pages.add(id(p)))
+        page.on("close", lambda p: self._watched.discard(id(p)))
 
     async def stop(self) -> None:
         try:
@@ -146,6 +191,8 @@ class BrowserEngine:
         self._browser = None
         self._page = None
         self._pw = None
+        self._watched.clear()
+        self._crashed_pages.clear()
         log.info("Browser stopped")
 
     @property
@@ -172,10 +219,16 @@ class BrowserEngine:
             return
         if self._page is None or self._page.is_closed() or id(self._page) in self._crashed_pages:
             log.warning("Page closed or crashed - opening a new tab")
-            self._crashed_pages.discard(id(self._page))
+            old = self._page
+            self._crashed_pages.discard(id(old))
             assert self._context is not None
             self._page = await self._context.new_page()
             self._watch_page(self._page)
+            if old is not None and not old.is_closed():
+                try:
+                    await old.close()  # a crashed tab is not left behind
+                except Exception:  # noqa: BLE001
+                    pass
 
     @property
     def page(self) -> Page:
@@ -199,6 +252,24 @@ class BrowserEngine:
         self._watch_page(page)
         return page
 
+    async def fresh_page(self) -> Page:
+        """A unit-of-work boundary (one application, one job read during discovery): continue in a new tab and
+        close the previous one. Chrome keeps one renderer per tab for same-site navigation, and heavy sites
+        (LinkedIn) never give its memory back - measured: one reused tab ~2-3 GB after 10 LinkedIn job pages, a fresh
+        tab per job ~0.6 GB. The browser, the persistent context and every login session stay as they are; the new
+        tab is opened before the old one is closed, so the context always keeps a page."""
+        await self.ensure_alive()
+        old = self._page
+        page = await self.context.new_page()  # (a page's own window.close() cannot close this tab - measured)
+        self._watch_page(page)
+        self._page = page
+        if old is not None and old is not page and not old.is_closed():
+            try:
+                await old.close()
+            except PlaywrightError as exc:
+                log.debug("closing the previous tab: %s", exc)
+        return page
+
     # ------------------------------------------------------------ control
     async def checkpoint(self) -> None:
         if self._checkpoint is not None:
@@ -216,6 +287,11 @@ class BrowserEngine:
     async def goto(self, url: str, *, wait_until: str = "domcontentloaded", retries: int = 2,
                    page: Page | None = None) -> Page:
         await self.checkpoint()
+        # A link scraped from a job page decides where the automation browser goes: web addresses only (a
+        # posting's "apply" link could just as well be file:, chrome:, javascript: or data:).
+        if url != "about:blank" and not is_web_url(url):
+            log.warning("Refused to open a non-web address: %s", str(url)[:80])
+            raise NavigationFailed(f"Refused to open a non-web address ({str(url).split(':', 1)[0][:20]}:...)")
         await self.ensure_alive()
         p = page or self.page
         last: Exception | None = None
@@ -252,7 +328,7 @@ class BrowserEngine:
                 " document.querySelectorAll('*').length].join('|')")
         except PlaywrightError:
             info = p.url
-        return hashlib.sha1(str(info).encode()).hexdigest()
+        return hashlib.sha1(str(info).encode(), usedforsecurity=False).hexdigest()  # a change fingerprint
 
     async def wait_for_page_change(self, before: str, *, timeout_ms: int = 10_000, page: Page | None = None,
                                    poll_ms: int = 250) -> bool:
@@ -483,20 +559,50 @@ class BrowserEngine:
         html_path = None
         if p is not None and not p.is_closed():
             try:
-                html = await p.content()
+                # (bounded: on a page stuck in a navigation that never finishes, content() waits for ever - run #42
+                # hung there for 9 minutes after a LinkedIn page timed out, deaf to Stop, with the browser open)
+                html = await asyncio.wait_for(p.content(), CAPTURE_TIMEOUT_S)
                 html_file = Path(shot).with_suffix(".html") if shot else (
                     self.screenshot_dir / f"{datetime.now():%Y%m%d-%H%M%S}-fail-{name}.html")
                 html_file.write_text(html, encoding="utf-8")
                 html_path = str(html_file)
-            except PlaywrightError:
-                pass
+            except (PlaywrightError, asyncio.TimeoutError, OSError) as exc:
+                log.debug("page source not saved: %s", exc.__class__.__name__)
         return {"screenshot": shot, "html": html_path, "url": p.url if p and not p.is_closed() else None}
 
-    async def detect_blockers(self, page: Page | None = None) -> list[str]:
-        """Detect CAPTCHA / OTP challenges that require a human."""
+    async def captcha_widget_present(self, page: Page | None = None) -> bool:
+        """An inline CAPTCHA widget is visible (in the page or in an embedded application iframe)."""
+        p = page or self.page
+        for frame in [p.main_frame, *[f for f in p.frames if f is not p.main_frame]][:8]:
+            for sel in CAPTCHA_WIDGET_SELECTORS:
+                try:
+                    loc = frame.locator(sel)
+                    if await loc.count() and await loc.first.is_visible():
+                        return True
+                except PlaywrightError:
+                    continue
+        return False
+
+    async def captcha_widget_solved(self, page: Page | None = None) -> bool:
+        """The inline CAPTCHA on the page (or in an embedded form) carries its proof: the widget's token, or the
+        answer typed into a code / sum box. Read-only: the assistant never solves or fills one."""
+        p = page or self.page
+        for frame in [p.main_frame, *[f for f in p.frames if f is not p.main_frame]][:8]:
+            try:
+                if await frame.evaluate(_CAPTCHA_SOLVED_JS):
+                    return True
+            except PlaywrightError:
+                continue
+        return False
+
+    async def detect_blockers(self, page: Page | None = None, *, include_widgets: bool = True) -> list[str]:
+        """Detect CAPTCHA / OTP challenges that require a human.
+
+        ``include_widgets=False`` ignores inline CAPTCHA checkboxes inside forms (see captcha_widget_present).
+        """
         p = page or self.page
         found: list[str] = []
-        for sel in CAPTCHA_SELECTORS:
+        for sel in (CAPTCHA_SELECTORS if include_widgets else CHALLENGE_SELECTORS):
             try:
                 loc = p.locator(sel)
                 if await loc.count() and await loc.first.is_visible():
@@ -516,11 +622,24 @@ class BrowserEngine:
             body = await p.evaluate("() => (document.body && document.body.innerText || '').slice(0, 5000)")
         except PlaywrightError:
             body = ""
-        if "captcha" not in found and CAPTCHA_TEXT.search(body or ""):
+        if "captcha" not in found and (CAPTCHA_TEXT.search(body or "")
+                                       or (include_widgets and WIDGET_TEXT.search(body or ""))):
             found.append("captcha")
         if "otp" not in found and OTP_TEXT.search(body or ""):
             found.append("otp")
         return found
+
+    async def all_text(self, page: Page | None = None, limit: int = 12_000, max_frames: int = 6) -> str:
+        """Visible text of the page and its child frames (embedded application forms live in iframes)."""
+        p = page or self.page
+        parts: list[str] = []
+        for frame in [p.main_frame, *[f for f in p.frames if f is not p.main_frame]][:max_frames]:
+            try:
+                parts.append(await asyncio.wait_for(frame.evaluate(
+                    "(n) => (document.body && document.body.innerText || '').slice(0, n)", limit), 4))
+            except (PlaywrightError, TimeoutError):
+                continue
+        return "\n".join(t for t in parts if t)
 
     async def body_text(self, page: Page | None = None, limit: int = 20_000) -> str:
         try:

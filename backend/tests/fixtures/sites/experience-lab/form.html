@@ -1,0 +1,36 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Experience fields</title></head><body>
+<form id="exp" onsubmit="return false">
+ <div><label for="e1">Years of experience with React (number)</label><input id="e1" type="number" required></div>
+ <div><label for="e2">Years of experience with React Hooks</label><input id="e2" type="number" step="0.5" required></div>
+ <div><label for="e3">Years of experience with Next.js</label><input id="e3" type="text" pattern="[0-9]+" required></div>
+ <div><label for="e4">Years of experience with TypeScript</label><input id="e4" type="text" required></div>
+ <div><label for="e5">How many years of React experience do you have?</label><select id="e5" required><option value="">Select</option>
+   <option>0</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option>
+   <option>7</option><option>8</option><option>9</option><option>10</option></select></div>
+ <div><label for="e6">React experience</label><select id="e6" required><option value="">Select</option><option>0-2 years</option>
+   <option>3-5 years</option><option>6-8 years</option><option>9+ years</option></select></div>
+ <div><label for="e7">Total React experience</label><select id="e7" required><option value="">Select</option><option>5 years</option>
+   <option>6 years</option><option>7 years</option></select></div>
+ <div><label for="e8">React experience in half years</label><select id="e8" required><option value="">Select</option>
+   <option>6 years</option><option>6.5 years</option><option>7 years</option></select></div>
+ <!-- LinkedIn style: plain text box, the rule only shows up after Next, linked through aria-describedby -->
+ <div><label for="e9">How many years of work experience do you have with React?</label>
+   <input id="e9" type="text" required aria-describedby="e9-err"><span id="e9-err"></span></div>
+ <div><label for="e10">React experience code</label>
+   <input id="e10" type="text" required aria-describedby="e10-err"><span id="e10-err"></span></div>
+ <button type="button" id="next">Next</button>
+</form>
+<script>
+  window.NEXT_OK = false;
+  document.getElementById('next').onclick = () => {
+    const rules = [['e9', /^\d+$/, 'Enter a whole number between 0 and 99'], ['e10', /^\d{4}$/, 'Enter the value as YYMM']];
+    let ok = true;
+    for (const [id, rx, msg] of rules) {
+      const el = document.getElementById(id), err = document.getElementById(id + '-err');
+      const bad = !rx.test(el.value);
+      el.setAttribute('aria-invalid', bad ? 'true' : 'false'); err.textContent = bad ? msg : '';
+      ok = ok && !bad;
+    }
+    window.NEXT_OK = ok;
+  };
+</script></body></html>

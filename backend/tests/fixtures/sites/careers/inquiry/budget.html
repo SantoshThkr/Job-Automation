@@ -1,0 +1,13 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Careers - Sr. Frontend Engineer | DharmaLab</title></head><body>
+<!-- dharmainfoservices.com (run #38): the careers page carries the agency's quote form (Name, Email, Budget, Phone).
+     Name, e-mail and phone were typed in and the user was then asked for a "Budget". -->
+<h1>Sr. Frontend Engineer</h1><section><h2>Apply for this job</h2><p>Send us your profile. 5+ years of React.</p></section>
+<form id="lead">
+ <label for="n">Name</label><input id="n" name="name" required>
+ <label for="e">Email</label><input id="e" name="email" type="email" required>
+ <label for="b">Budget</label><input id="b" name="budget" required>
+ <label for="p">Phone number +91</label><input id="p" name="phone" type="tel" required>
+ <button type="submit">Submit</button>
+</form>
+<script>window.SUBMITS = 0; document.querySelector('form').addEventListener('submit', (e) => { e.preventDefault(); window.SUBMITS++; });</script>
+</body></html>

@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { useAction, usePoll } from "@/lib/hooks";
 import { PORTAL_LABEL } from "@/lib/format";
+import { SavedAnswers } from "@/components/SavedAnswers";
 
 const list = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean);
 
@@ -72,19 +73,7 @@ export default function SettingsPage() {
               </p>
             ) : <p className="muted">Checking…</p>}
           </div>
-          <div className="card">
-            <h2>Saved answers</h2>
-            <p className="muted small">Answers you gave for questions the assistant could not answer. Reused automatically.</p>
-            {!memory.data?.length && <p className="muted small">None yet.</p>}
-            <ul className="timeline">
-              {memory.data?.map((m) => (
-                <li key={m.id} style={{ gridTemplateColumns: "1fr auto" }}>
-                  <span className="small"><strong>{m.question}</strong><br />{m.answer} <span className="muted">· used {m.times_used}×</span></span>
-                  <button className="btn small danger" onClick={async () => { await api.deleteMemory(m.id); memory.refresh(); }}>Delete</button>
-                </li>
-              ))}
-            </ul>
-          </div>
+          <SavedAnswers items={memory.data ?? []} onChange={memory.refresh} />
         </div>
       </div>
     </>

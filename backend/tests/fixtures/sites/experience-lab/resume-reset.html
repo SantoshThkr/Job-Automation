@@ -1,0 +1,31 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Apply - Front End developer | ResetLab</title>
+<style>.error{color:#c00}</style></head><body>
+<!-- app.intellohire.com (run #38): the first Save was refused for the phone format; the form was redrawn with the
+     upload box empty; the assistant re-entered the phone but not the resume ("already provided") and the second Save
+     was refused with "Please attach your resume". -->
+<h1>Front End developer</h1>
+<form id="app">
+ <label for="cv">Upload Resume *</label><input id="cv" name="cv" type="file" required>
+ <label for="nm">Name *</label><input id="nm" name="name" required>
+ <label for="ph">Phone *</label><input id="ph" name="phone" type="tel" required>
+ <div id="errors"></div>
+ <button type="submit">Save application</button>
+</form><div id="out"></div>
+<script>
+  window.SUBMITS = 0; window.REFUSALS = 0; window.UPLOADS = 0;
+  const form = document.getElementById('app'), errors = document.getElementById('errors');
+  // ?mode=token (what intellohire really does): the file is uploaded when it is chosen and the form only keeps a
+  // token for it; a refused Save drops the token - while the upload box still shows the file
+  const TOKEN = new URLSearchParams(location.search).get('mode') === 'token'; let token = '';
+  document.addEventListener('change', (e) => { if (e.target.name === 'cv' && e.target.files.length) { window.UPLOADS++; token = 'tok-' + window.UPLOADS; } });
+  form.addEventListener('submit', (e) => { e.preventDefault(); errors.innerHTML = '';
+    const phone = document.getElementById('ph').value.trim(), cv = document.getElementById('cv');
+    if (TOKEN ? !token : !cv.files.length) { window.REFUSALS++; errors.innerHTML = '<p class="error">Please attach you resume.</p>'; return; }
+    if (!/^\+91\d{10}$/.test(phone)) { window.REFUSALS++;
+      errors.innerHTML = '<p class="error">Phone: Enter valid contact number</p>';
+      if (TOKEN) token = '';   // the site forgets its copy; the box still shows the file
+      else { const fresh = cv.cloneNode(); fresh.value = ''; cv.replaceWith(fresh); }   // the form is redrawn: the upload box is empty again
+      return; }
+    window.SUBMITS++; form.hidden = true;
+    document.getElementById('out').innerHTML = '<div role="status">Your application has been received.</div>'; });
+</script></body></html>

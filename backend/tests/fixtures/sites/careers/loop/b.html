@@ -1,0 +1,10 @@
+<!doctype html><html><head><meta charset="utf-8"><title>LoopLab</title></head><body>
+<!-- limitlessmobil.com (run #26): no page leads to an application for the job; every page is a little different, and
+     the local AI advised 'Career' eight times in a row (each ~15 s, with a 3 GB model loaded) -->
+<main><h1>Life at LoopLab</h1><p>Photos of our offsite. No openings are listed here.</p><p id="visit"></p>
+<p>Explore: <button type="button" id="go">Career</button></p></main>
+<script>
+  const n = Number(new URLSearchParams(location.search).get('n') || 0) + 1;
+  document.title = 'LoopLab - page ' + n; document.getElementById('visit').textContent = 'Visit ' + n + ' - ' + 'x'.repeat(n * 40);
+  document.getElementById('go').onclick = () => { location.href = 'a.html?n=' + n; };
+</script></body></html>

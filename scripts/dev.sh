@@ -1,11 +1,21 @@
 #!/usr/bin/env bash
 # Run the API (http://127.0.0.1:8000) and the dashboard (http://localhost:3000) together. Ctrl+C stops both.
+# Both listen on this machine only (loopback): the dashboard reads your profile and controls the agent.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-(cd backend && exec .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port "${PJA_API_PORT:-8000}") &
+umask 077  # files created while running (database, logs, screenshots) are private to your account
+
+# The API reads .env itself; the dashboard server needs two of its values too (never sent to the browser).
+env_value() { { [ -f .env ] && grep -E "^$1=" .env | tail -1 | cut -d= -f2- | sed -E 's/[[:space:]]+#.*$//; s/^["'"'"']//; s/["'"'"']$//'; } || true; }
+PORT="${PJA_API_PORT:-$(env_value PJA_API_PORT)}"; PORT="${PORT:-8000}"
+export PJA_BACKEND_URL="${PJA_BACKEND_URL:-http://127.0.0.1:$PORT}"
+TOKEN="${PJA_API_TOKEN:-$(env_value PJA_API_TOKEN)}"
+if [ -n "$TOKEN" ]; then export PJA_API_TOKEN="$TOKEN"; fi
+
+(cd backend && exec .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port "$PORT" --no-server-header) &
 API=$!
 (cd frontend && exec npm run dev) &
 WEB=$!
 trap 'kill $API $WEB 2>/dev/null; wait 2>/dev/null' INT TERM EXIT
-echo "API: http://127.0.0.1:${PJA_API_PORT:-8000}   Dashboard: http://localhost:3000"
+echo "API: http://127.0.0.1:$PORT   Dashboard: http://localhost:3000   (this machine only)"
 wait

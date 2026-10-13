@@ -1,0 +1,19 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Senior React Developer - HRP</title>
+<style>.hp{position:absolute;left:0;top:0;width:2px;height:2px;opacity:0.01}</style></head><body>
+<main><h1>Senior React Developer</h1><p>React, Redux, TypeScript. 6+ years.</p>
+<section><h2>APPLY HERE</h2>
+<form action="/careers/placeholder/thanks.html" method="post" id="f">
+<input name="zfname" placeholder="First Name*" required>
+<input name="zlname" placeholder="Last Name*" required>
+<input type="email" name="zemail" placeholder="Email*" required>
+<input type="tel" name="ztel" placeholder="Phone Number*" required>
+<select name="total_experience" required><option value="">Total Experience*</option><option>0-3 Years</option><option>3-6 Years</option><option>6-10 Years</option><option>10+ Years</option></select>
+<select name="notice_period" required><option value="">Select Notice Period</option><option>Immediate</option><option>15 Days</option><option>30 Days</option><option>60 Days</option></select>
+<input name="zcctc" placeholder="Current CTC*" required>
+<input name="zectc" placeholder="Expected CTC*" required>
+<input name="honeypot" class="hp" tabindex="-1" autocomplete="off">
+<input type="file" name="resume" required>
+<button type="submit">SEND US</button>
+</form></section></main>
+<script>document.getElementById('f').addEventListener('submit', () => { window.__honeypot = document.querySelector('[name=honeypot]').value; sessionStorage.setItem('hp', window.__honeypot); });</script>
+</body></html>

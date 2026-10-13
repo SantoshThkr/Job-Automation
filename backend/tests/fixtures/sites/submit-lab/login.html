@@ -1,0 +1,12 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Login</title></head><body>
+<!-- the page a site sends you to when it wants a sign-in: its own start-up call is answered {"success": true} -->
+<a href="/">Go to website</a>
+<h2>Login / Signup</h2>
+<form id="login"><select name="cc"><option>+91 (IND)</option></select><input name="phone" type="tel" placeholder="Mobile number">
+ <label><input type="checkbox" name="terms"> I accept all terms &amp; conditions</label>
+ <button type="submit" id="otp">Get OTP</button></form>
+<script>
+  window.OTP_REQUESTS = 0;
+  fetch('/submit-lab/api/apply?r=ok', { method: 'POST', body: '{}' });
+  document.getElementById('login').addEventListener('submit', (e) => { e.preventDefault(); window.OTP_REQUESTS++; });
+</script></body></html>

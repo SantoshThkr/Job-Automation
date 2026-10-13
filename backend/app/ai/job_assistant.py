@@ -241,4 +241,62 @@ class JobAssistant:
         return AIResult(answer, conf, note, guard, data)
 
 
-__all__ = ["AIResult", "AIUnavailable", "AIResponseError", "JobAssistant", "JobUnderstanding"]
+_GROUNDED_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "answer": {"type": "string"},
+        "sources": {"type": "array", "items": {"type": "string"}},
+        "confidence": {"type": "number"},
+        "requires_user": {"type": "boolean"},
+    },
+    "required": ["answer", "sources", "confidence", "requires_user"],
+}
+
+_CATEGORY_GUIDE = {
+    "WHY_ROLE": "Why this role interests the candidate: connect the job's main requirements to the candidate's matching "
+                "skills and experience.",
+    "WHY_COMPANY": "Why this company: use only what the job posting says about the company/role, connected to the "
+                   "candidate's matching experience.",
+    "WHY_HIRE": "Why the candidate is a good fit: the most relevant matching skills, years and experience.",
+    "STRENGTHS": "The candidate's key strengths, taken from skills, summary and highlights, most relevant to the job first.",
+    "TECHNICAL_EXPERIENCE": "The candidate's experience with the technology asked about: where it was used (only roles "
+                            "that list it), for how long (only the years given), and what was built.",
+    "EXPERIENCE": "An overview of the candidate's professional experience.",
+    "CURRENT_RESPONSIBILITIES": "What the candidate does in the current role, from the current role's summary.",
+    "PROJECT_EXPERIENCE": "A project the candidate worked on, ONLY from the projects / role summaries given. If none fits, "
+                          "set requires_user=true.",
+    "ACHIEVEMENT": "An achievement ONLY if a fact states one with its outcome. Otherwise set requires_user=true.",
+    "CAREER_GOALS": "The candidate's direction, inferred from target roles and focus areas. No promises or new facts.",
+    "ABOUT": "A short professional introduction from the summary and highlights.",
+    "COVER_LETTER": "A short professional cover letter: introduction, why this role, why a good fit, closing.",
+}
+
+
+async def generate_grounded(assistant: JobAssistant, *, knowledge_block: str, category: str, question: str,
+                            job: JobInput | None, length: str, max_chars: int, page_context: str = "") -> dict:
+    """Write an application answer from KEYED verified facts; the model must say which keys it used."""
+    words = {"short": "one short sentence (at most 25 words)", "medium": "2 to 4 concise sentences",
+             "long": "3 short paragraphs (at most 220 words)"}[length]
+    system = (
+        "You write job application answers in first person for the candidate. Use ONLY the candidate facts given "
+        "(each starts with its [source key]) and the job posting. Never invent employers, projects, titles, degrees, "
+        "certifications, achievements, numbers, dates, salaries or technologies the facts do not contain. You may "
+        "rephrase, combine and prioritise facts that match the job. No greetings, no placeholders, no markdown. "
+        "If the facts cannot truthfully answer the question, return requires_user=true and an empty answer. "
+        "Answer with JSON only.")
+    job_txt = _job_block(job) if job else "(no job description available)"
+    prompt = (
+        f"CANDIDATE FACTS:\n{knowledge_block}\n\nJOB POSTING:\n{job_txt[:3000]}\n"
+        + (f"\nAPPLICATION PAGE (context):\n{page_context[:800]}\n" if page_context else "")
+        + f"\nQUESTION: {question}\nTASK: {_CATEGORY_GUIDE.get(category, 'Answer truthfully from the facts.')}\n"
+        f"LENGTH: {words}; at most {max_chars} characters.\n"
+        "Return JSON: answer, sources (the [source keys] you used, plus job.description if you used the posting), "
+        "confidence (0-1), requires_user (true/false).")
+    data = await assistant.provider.chat_json(system, prompt, json_schema=_GROUNDED_SCHEMA, temperature=0.2,
+                                              max_tokens=700 if length == "long" else 400)
+    if not isinstance(data, dict):
+        raise AIResponseError("grounded answer is not an object")
+    return data
+
+
+__all__ = ["AIResult", "AIUnavailable", "AIResponseError", "JobAssistant", "JobUnderstanding", "generate_grounded"]

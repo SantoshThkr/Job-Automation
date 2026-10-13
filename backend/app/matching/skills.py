@@ -32,7 +32,7 @@ _SKILLS: list[SkillDef] = [
     SkillDef("Zustand", "frontend", r"\bzustand\b", 1.0),
     SkillDef("React Query", "frontend", r"\breact[\s-]?query\b|\btanstack\b", 1.0),
     SkillDef("RxJS", "frontend", r"\brxjs\b", 1.0),
-    SkillDef("JavaScript", "frontend", r"\bjavascript\b|\bjava\s+script\b|\bes6\+?\b|\becmascript\b|\bvanilla\s+js\b|\bjs\b", 1.0),
+    SkillDef("JavaScript", "frontend", r"\bjavascript\b|\bjava\s+script\b|\bes6\+?\b|\becmascript\b|\bvanilla\s+js\b|(?<![.\w])js\b", 1.0),
     SkillDef("TypeScript", "frontend", r"\btypescript\b", 1.0),
     SkillDef("HTML", "frontend", r"\bhtml\s?5?\b", 1.2),
     SkillDef("CSS", "frontend", r"\bcss\s?3?\b(?![\s-]*in[\s-]*js)|\bcss[\s-]in[\s-]js\b", 1.2),
@@ -121,10 +121,20 @@ _SKILLS: list[SkillDef] = [
     SkillDef("Android", "mobile", r"\bandroid\b|\bkotlin\b", 1.5),
     SkillDef("iOS", "mobile", r"\bios\b|\bxcode\b", 1.5),
     # --- Data / ML ------------------------------------------------------
-    SkillDef("Machine Learning", "data", r"\bmachine\s+learning\b|\bdeep\s+learning\b|\bml\b|\bnlp\b|\bllms?\b", 1.5),
+    SkillDef("Machine Learning", "data", r"\bmachine\s+learning\b|\bdeep\s+learning\b|\bml\b|\bnlp\b|\bmodel\s+training\b", 1.5),
     SkillDef("Data Engineering", "data", r"\bspark\b|\bhadoop\b|\bairflow\b|\betl\b|\bdata\s+pipelines?\b|\bsnowflake\b|\bdatabricks\b", 1.5),
     SkillDef("Data Analysis", "data", r"\bpandas\b|\bnumpy\b|\btableau\b|\bpower\s?bi\b|\bdata\s+analysis\b", 1.2),
     SkillDef("TensorFlow", "data", r"\btensorflow\b|\bpytorch\b|\bkeras\b|\bscikit[\s-]learn\b", 1.5),
+
+    # --- AI-powered applications (LLM APIs, RAG, agents). Neutral for the frontend/backend ratio: these
+    # skills appear in frontend + AI roles as much as in backend ones.
+    SkillDef("Generative AI", "ai", r"\bgen(?:erative)?[\s-]?ai\b|\bllms?\b|\blarge\s+language\s+models?\b|\bchat\s?gpt\b|"
+                                   r"\bgpt[\s-]?\d(?:\.\d)?o?\b|\bopen\s?ai\b|\bazure\s+open\s?ai\b|\bclaude\b|\bgemini\b|"
+                                   r"\bprompt\s+engineering\b|\bcopilot\b", 1.0),
+    SkillDef("RAG", "ai", r"\brag\b|\bretrieval[\s-]augmented\b|\bvector\s+(?:db|database|search|stores?)s?\b|"
+                         r"\bembeddings?\b|\bpinecone\b|\bchromadb\b|\bweaviate\b|\bfaiss\b|\bpgvector\b", 1.0),
+    SkillDef("AI Agents", "ai", r"\bai\s+agents?\b|\bagentic\b|\blangchain\b|\blanggraph\b|\bllama\s?index\b|"
+                               r"\bautogen\b|\bcrew\s?ai\b|\bvercel\s+ai\s+sdk\b|\bai\s+sdk\b", 1.0),
 ]
 
 FRONTEND_CATEGORIES = {"frontend", "testing", "design"}

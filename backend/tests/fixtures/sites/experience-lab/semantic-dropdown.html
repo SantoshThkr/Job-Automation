@@ -1,0 +1,72 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Front End developer | LogicLab</title>
+<style>.menu{display:none;border:1px solid #999}.menu.visible{display:block}.item{padding:4px;cursor:pointer}.ui.error.message{color:#c00}
+/* as in Semantic UI: the search box of a multiple dropdown is a few pixels wide and the placeholder text lies over it */
+.ui.dropdown{position:relative;min-height:30px;border:1px solid #bbb}
+.ui.dropdown.multiple input.search{width:29px;position:relative;z-index:1}
+.ui.dropdown.multiple .default.text{position:absolute;left:0;top:0;right:0;height:28px;z-index:3;padding:4px}
+.ui.dropdown .text.filtered{display:none}</style></head><body>
+<!-- app.intellohire.com (run #35, Logic Planet): Semantic-UI "search dropdowns" - a text box that only filters, a list
+     of plain div.item entries (no role), the value in a hidden input, and "required" only as a class of the wrapper.
+     The city and the preferred locations were typed, nothing was chosen, and the form answered
+     "Select candidate current city" / "Enter candidate preferred locations". -->
+<h1>Front End developer</h1>
+<!-- the form sits in a Semantic-UI modal: Escape closes it (and resets the form), as on the real site -->
+<div class="ui modal visible active" id="dialog" style="position:fixed;inset:2%;overflow:auto;background:#fff;border:1px solid #666;padding:8px">
+<form class="ui form" id="app">
+ <div class="field required"><label>Name</label><input name="name" placeholder="Candidate name"></div>
+ <div class="required field"><label>Email</label><input name="email" placeholder="Email ID"></div>
+ <div class="field required"><label>Current city</label>
+  <div class="ui dropdown search selection remote-data" data-name="city"><select name="city-native" hidden><option value="">Search City</option></select><input type="hidden" name="city"><input class="search" autocomplete="off">
+   <div class="default text">Select city</div><div class="menu"></div></div></div>
+ <div class="field required"><label>Looking for jobs in</label>
+  <div class="ui selection dropdown search multiple" data-name="pref"><select multiple name="pref-native" hidden></select><input type="hidden" name="pref"><input class="search" autocomplete="off">
+   <div class="default text">Search Preferred Location</div><div class="menu"></div></div></div>
+ <div class="field required"><label>Total experience (in yrs)</label>
+  <div class="ui selection search dropdown fulltext" data-name="exp" data-static="1"><select name="exp-native" hidden></select><input type="hidden" name="exp"><input class="search" autocomplete="off">
+   <div class="default text">Select</div><div class="menu"></div></div></div>
+ <div class="field"><label>Key Skills</label>
+  <div class="ui selection search multiple remote-data dropdown" data-name="skills" data-empty="1"><select multiple name="skills-native" hidden></select><input type="hidden" name="skills"><input class="search" autocomplete="off">
+   <div class="default text">Select key skills</div><div class="menu"></div></div></div>
+ <div class="field required mb2"><label>Upload Resume</label><input type="file" name="cv"></div>
+ <div class="ui error message" hidden><ul class="list"></ul></div>
+ <button type="submit" class="ui button">Apply</button>
+</form></div><div id="out"></div>
+<script>
+  window.SUBMITS = 0; window.SENT = null; window.ESCAPED = 0;
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { window.ESCAPED++; document.getElementById('dialog').style.display = 'none'; document.getElementById('app').reset(); } });
+  const CITIES = ['Bengaluru', 'Pune', 'Mumbai', 'Remote', 'Bengaluru Rural', 'Hyderabad'];
+  // as on the real form: "Fresher", "0 Year 1 Month (0.1)", ... "7 Years (7.0)", "7 Years 1 Month (7.1)" ...
+  const YEARS = ['Fresher'];
+  for (let y = 0; y <= 12; y++) for (let m = (y ? 0 : 1); m < 12; m++)
+    YEARS.push(y + (y === 1 ? ' Year' : ' Years') + (m ? ' ' + m + (m === 1 ? ' Month' : ' Months') : '') + ' (' + y + '.' + m + ')');
+  const fillNative = (name, values) => { const sel = document.querySelector('[name=' + name + ']'); values.forEach(v => sel.add(new Option(v, v))); };
+  fillNative('pref-native', CITIES); fillNative('exp-native', YEARS);
+  document.querySelectorAll('.ui.dropdown').forEach(dd => {
+    const search = dd.querySelector('input.search'), hidden = dd.querySelector('input[type=hidden]'), menu = dd.querySelector('.menu');
+    const source = dd.dataset.empty ? [] : dd.dataset.static ? YEARS : CITIES; let timer = 0;
+    const show = () => { const q = search.value.trim().toLowerCase(); clearTimeout(timer);
+      timer = setTimeout(() => { const hits = source.filter(x => !q || x.toLowerCase().includes(q)).slice(0, 8);
+        menu.innerHTML = hits.map(x => '<div class="item" data-value="' + x + '">' + x + '</div>').join('') || '<div class="message">No results found.</div>';
+        menu.classList.add('visible');
+        menu.querySelectorAll('.item').forEach(it => it.addEventListener('mousedown', (e) => { e.preventDefault();
+          if (dd.classList.contains('multiple')) { hidden.value = hidden.value ? hidden.value + ',' + it.dataset.value : it.dataset.value;
+            search.insertAdjacentHTML('beforebegin', '<a class="ui label">' + it.dataset.value + '</a>'); }
+          else { hidden.value = it.dataset.value; let t = dd.querySelector('.text'); t.classList.remove('default'); t.textContent = it.dataset.value; }
+          search.value = ''; menu.classList.remove('visible'); })); }, dd.dataset.static ? 50 : 700); };
+    search.addEventListener('focus', show); search.addEventListener('input', show);
+    search.addEventListener('input', () => { const t = dd.querySelector('.text'); if (t) t.classList.toggle('filtered', !!search.value); });  // as Semantic UI does
+    search.addEventListener('blur', () => setTimeout(() => {
+      if (dd.dataset.static && search.value && !hidden.value) { hidden.value = source[0]; const t0 = dd.querySelector('.text'); t0.classList.remove('default'); t0.textContent = source[0]; }  // forced selection
+      search.value = ''; menu.classList.remove('visible');
+      const t = dd.querySelector('.text'); if (t) t.classList.remove('filtered'); }, 150));
+  });
+  document.getElementById('app').addEventListener('submit', (e) => { e.preventDefault();
+    const v = (n) => document.querySelector('[name=' + n + ']').value; const errors = [];
+    if (!v('name')) errors.push('Enter candidate name'); if (!v('city')) errors.push('Select candidate current city');
+    if (!v('pref')) errors.push('Enter candidate preferred locations'); if (!v('exp')) errors.push('Select total experience');
+    const box = document.querySelector('.ui.error.message'); box.hidden = !errors.length;
+    box.querySelector('ul').innerHTML = errors.map(x => '<li>' + x + '</li>').join('');
+    if (errors.length) return;
+    window.SUBMITS++; window.SENT = { city: v('city'), pref: v('pref'), exp: v('exp') };
+    document.getElementById('app').hidden = true; document.getElementById('out').innerHTML = '<div class="ui success message" role="status">Your application has been received.</div>'; });
+</script></body></html>

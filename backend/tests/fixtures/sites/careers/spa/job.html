@@ -1,0 +1,18 @@
+<!doctype html><html><head><meta charset="utf-8"><title>React Developer | Infosys</title>
+<style>.btn{cursor:pointer;display:inline-block;padding:6px 12px;background:#0a6;color:#fff}#dlg{display:none;position:fixed;inset:10%;background:#fff;border:1px solid #333;padding:16px;overflow:auto}</style></head><body>
+<div id="app"><h2>React Developer | Infosys <span class="btn" id="apply">Apply</span></h2>
+<p>Strong proficiency in ReactJS (6+ years), Redux, hooks.</p></div>
+<div id="dlg" role="dialog" aria-modal="true"><h3>Apply for React Developer</h3>
+<label>Upload Resume <input type="file" id="cv"></label>
+<label>Name <input id="name"></label><label>Phone <input id="phone"></label><label>Email <input id="email"></label>
+<label>Total experience (in yrs) <input id="exp"></label><label>Notice period (in days) <input id="np"></label>
+<i class="close" style="cursor:pointer" onclick="dlg.style.display='none'">red close icon</i>
+<button id="save">Save</button></div>
+<script>
+document.getElementById('apply').addEventListener('click', () => { dlg.style.display = 'block'; });
+document.getElementById('save').addEventListener('click', () => {
+  const v = (id) => document.getElementById(id);
+  window.__spa = {name: v('name').value, email: v('email').value, exp: v('exp').value, np: v('np').value, cv: v('cv').files.length};
+  dlg.innerHTML = '<h3>Your application has been submitted successfully.</h3>';
+});
+</script></body></html>

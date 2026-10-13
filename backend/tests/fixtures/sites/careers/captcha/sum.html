@@ -1,0 +1,15 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Apply - AI Developer | GarudaLab</title></head><body>
+<!-- garudauav.com (run #23): the Submit button stays disabled until the sum is typed. It was reported as "could not
+     find a Next or Submit button". A sum to type is a CAPTCHA: left to the user, never answered. -->
+<main><h1>AI Developer</h1>
+<form id="f"><label for="n">Name*</label><input id="n" name="name" required>
+<label for="e">Email*</label><input id="e" type="email" name="email" required>
+<label for="r">Upload Resume*</label><input id="r" type="file" name="attachment" required>
+<label for="c">What is 3 + 4?</label><input id="c" type="number" name="captchaInputValue" placeholder="Enter answer" onkeyup="check()" oninput="check()">
+<button type="submit" id="applybtn" disabled>Submit</button></form></main>
+<script>
+window.SUBMITS = 0;
+function check() { document.getElementById('applybtn').disabled = document.getElementById('c').value.trim() !== '7'; }
+document.getElementById('f').addEventListener('submit', (e) => { e.preventDefault(); window.SUBMITS++;
+  document.querySelector('main').innerHTML = '<h1>Thanks for applying!</h1><p>Your application was submitted.</p>'; });
+</script></body></html>

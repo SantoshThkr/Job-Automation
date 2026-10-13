@@ -12,6 +12,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -40,6 +41,8 @@ class JobStatus(StrEnum):
     FAILED = "FAILED"
     ALREADY_APPLIED = "ALREADY_APPLIED"
     DUPLICATE = "DUPLICATE"
+    EXPIRED = "EXPIRED"  # the posting is closed / no longer accepting applications
+    PARKED = "PARKED"  # you parked it: kept out of 'Needs you' and never retried until you Retry it
 
 
 TERMINAL_STATUSES = {
@@ -47,6 +50,7 @@ TERMINAL_STATUSES = {
     JobStatus.ALREADY_APPLIED,
     JobStatus.DUPLICATE,
     JobStatus.SKIPPED,
+    JobStatus.EXPIRED,
 }
 
 # Statuses that mean "do not touch again automatically".
@@ -151,6 +155,14 @@ class Application(Base):
     manual_action_reason: Mapped[str] = mapped_column(Text, default="")
     review_decision: Mapped[str | None] = mapped_column(String(16), nullable=True)  # approve|reject
     final_url: Mapped[str] = mapped_column(Text, default="")
+    # where to continue a parked application (company site page it stopped on), so a retry does not restart
+    resume_url: Mapped[str] = mapped_column(Text, default="")
+    steps: Mapped[int] = mapped_column(Integer, default=0)
+    # submission verification (engine/submission.py): confirmed | uncertain | failed, and what it rests on
+    verification_state: Mapped[str] = mapped_column(String(16), default="")
+    verification_evidence: Mapped[list] = mapped_column(JSON, default=list)
+    verify_requested: Mapped[bool] = mapped_column(Boolean, default=False)  # re-check only, never resubmit
+    verification_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     applied_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
@@ -177,6 +189,10 @@ class QuestionAnswer(Base):
     source: Mapped[str] = mapped_column(String(32), default="")  # profile|rule|memory|ai|user|none
     needs_review: Mapped[bool] = mapped_column(Boolean, default=False)
     note: Mapped[str] = mapped_column(Text, default="")
+    category: Mapped[str] = mapped_column(String(32), default="")  # question intent
+    mode: Mapped[str] = mapped_column(String(24), default="")  # profile|derived|ai_generated|composed|memory|...
+    sources: Mapped[list[str]] = mapped_column(JSON, default=list)  # profile keys the answer is grounded in
+    verified: Mapped[bool | None] = mapped_column(Boolean, nullable=True)  # the form shows the value we set
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     application: Mapped[Application] = relationship(back_populates="answers")
@@ -200,14 +216,27 @@ class ApplicationEvent(Base):
 
 
 class AnswerMemory(Base):
-    """Answers the user supplied for questions the assistant could not answer confidently."""
+    """Answers the user supplied for questions the assistant could not answer confidently.
+
+    One question may have several answers, one per reuse scope (a general one, one for a portal, one for an
+    employer, one for a single job); the most specific that applies is used (see recorder.lookup_memory)."""
 
     __tablename__ = "answer_memory"
+    __table_args__ = (Index("uq_answer_memory_scope", "normalized_question", "scope", "company", "portal", "job_key",
+                            unique=True),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    normalized_question: Mapped[str] = mapped_column(Text, unique=True)
+    normalized_question: Mapped[str] = mapped_column(Text, index=True)
     question: Mapped[str] = mapped_column(Text)
     answer: Mapped[str] = mapped_column(Text)
+    category: Mapped[str] = mapped_column(String(32), default="")
+    # global | portal | company | job; "category" rows are wording-independent keys ('skill years: mongodb')
+    scope: Mapped[str] = mapped_column(String(16), default="global")
+    company: Mapped[str] = mapped_column(String(255), default="")  # for company- and job-scoped answers
+    portal: Mapped[str] = mapped_column(String(32), default="")  # for portal-scoped answers
+    # for job-scoped answers: the job's title key (a database default too: a dashboard still running the previous
+    # version writes rows without this column)
+    job_key: Mapped[str] = mapped_column(String(255), default="", server_default="")
     times_used: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
@@ -249,6 +278,13 @@ class AgentState(Base):
     gate_reason: Mapped[str] = mapped_column(Text, default="")
     gate_response: Mapped[str | None] = mapped_column(String(16), nullable=True)  # approve|reject
     gate_opened_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    gate_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # e.g. questions to answer
+    gate_answers: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # your answers from the dashboard
+    # live view of what the agent is doing right now
+    current_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    current_step: Mapped[str] = mapped_column(Text, default="")
+    current_url: Mapped[str] = mapped_column(Text, default="")
+    phase: Mapped[str] = mapped_column(String(32), default="")  # discovering|applying|waiting|idle
     repeat_minutes: Mapped[int] = mapped_column(Integer, default=0)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 

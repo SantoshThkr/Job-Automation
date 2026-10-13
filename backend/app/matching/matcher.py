@@ -39,7 +39,10 @@ class JobMatcher:
         if want_ai and self.assistant is not None and not result.blockers:
             near_threshold = (abs(result.score - m.apply_threshold) <= 10
                               or abs(result.score - m.skip_threshold) <= 5)
-            if not m.ai_for_ambiguous_only or result.decision == Decision.MANUAL_REVIEW or near_threshold:
+            # the title alone does not say what the job is: let the model read the description
+            title_unclear = result.analysis.get("title_category") in {"generic", "other", "fullstack"}
+            if (not m.ai_for_ambiguous_only or result.decision == Decision.MANUAL_REVIEW or near_threshold
+                    or title_unclear):
                 await self._apply_ai(job, result)
         elif want_ai and result.blockers:
             result.ai = {"used": False, "reason": "hard blocker - AI not needed"}
@@ -78,10 +81,14 @@ class JobMatcher:
 
         before = result.decision
         decisive = u.confidence >= AI_DECISIVE_CONFIDENCE
+        title_unclear = result.analysis.get("title_category") in {"generic", "other", "fullstack"}
         if before == Decision.APPLY:
             if decisive and u.recommendation == "SKIP":
                 result.decision = Decision.MANUAL_REVIEW.value
                 result.flags.append(f"AI disagrees with rules: {u.summary or 'not a fit'}")
+            elif decisive and u.recommendation == "MANUAL_REVIEW" and title_unclear:
+                result.decision = Decision.MANUAL_REVIEW.value
+                result.flags.append(f"AI is unsure about this role: {u.summary or 'please check'}")
             elif result.score < m.apply_threshold - 5:
                 result.decision = Decision.MANUAL_REVIEW.value
         elif before == Decision.MANUAL_REVIEW:
@@ -99,5 +106,5 @@ class JobMatcher:
                               f"frontend {u.frontend_percentage}%, confidence {u.confidence:.2f})")
 
     def _attach_resume(self, result: MatchResult) -> None:
-        resume = select_resume(self.profile, result.category, result.matched_skills)
+        resume = select_resume(self.profile, result.resume_category or result.category, result.matched_skills)
         result.resume_id = resume.id if resume else None

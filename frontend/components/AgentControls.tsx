@@ -1,14 +1,15 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { AgentState, Mode, Portal, api } from "@/lib/api";
 import { useAction } from "@/lib/hooks";
-import { MODE_LABEL, PORTAL_LABEL, timeAgo } from "@/lib/format";
+import { MODE_LABEL, PORTAL_LABEL, hostOf, safeHref, timeAgo } from "@/lib/format";
 
 const MODES: { value: Mode; hint: string }[] = [
   { value: "dry_run", hint: "Find, score and fill forms - never submits." },
   { value: "review", hint: "Fills everything, then waits for your Approve before each submit." },
-  { value: "auto", hint: "Submits automatically when every answer is confident; otherwise flags it for you." },
+  { value: "auto", hint: "Submits automatically when every answer is confident; asks you (or parks the job) when it is not." },
 ];
 const PORTALS: Portal[] = ["naukri", "linkedin", "instahyre"];
 
@@ -101,12 +102,28 @@ export function AgentControls({ agent, onChange, defaultPortals }: {
         <button className="btn danger" disabled={busy || (!alive && desired === "STOPPED")} onClick={act(api.stop)}>Stop</button>
       </div>
 
-      {agent && (agent.current_activity || agent.message) && (
-        <p className="small" style={{ marginBottom: 0 }}>
-          {agent.current_activity && <><strong>Now:</strong> {agent.current_activity}<br /></>}
-          {agent.message && <span className="muted">{agent.message}</span>}
-        </p>
+      {alive && agent && (agent.current_job || agent.current_step || agent.current_activity) && (
+        <div className="now" aria-live="polite">
+          <div className="spread">
+            <span className="label">Now</span>
+            {agent.phase && <span className="phase">{agent.phase}</span>}
+          </div>
+          {agent.current_job && (
+            <div>
+              <Link href={`/jobs/${agent.current_job.id}`}>{agent.current_job.title}</Link>
+              <span className="muted"> @ {agent.current_job.company} · {PORTAL_LABEL[agent.current_job.portal] ?? agent.current_job.portal}
+                {agent.current_job.match_score != null && <> · score {Math.round(agent.current_job.match_score)}</>}</span>
+            </div>
+          )}
+          <div className="step">{agent.current_step || agent.current_activity}</div>
+          {agent.current_url && (
+            <div className="small muted ellipsis" style={{ maxWidth: "100%" }}>
+              on <a href={safeHref(agent.current_url)} target="_blank" rel="noopener noreferrer">{hostOf(agent.current_url)}</a>
+            </div>
+          )}
+        </div>
       )}
+      {agent?.message && <p className="small muted" style={{ marginBottom: 0 }}>{agent.message}</p>}
       {agent?.last_error && <p className="small lvl-error" style={{ marginBottom: 0 }}>Last error: {agent.last_error}</p>}
       {error && <p className="small lvl-error" style={{ marginBottom: 0 }}>{error}</p>}
     </div>

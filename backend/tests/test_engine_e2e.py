@@ -81,8 +81,9 @@ async def test_dry_run_across_all_portals(engine, site_server, clean_db):
         ("naukri", "10082000000"): "DRY_RUN",
         ("linkedin", "3001"): "DRY_RUN", ("linkedin", "3002"): "DRY_RUN", ("linkedin", "3003"): "ALREADY_APPLIED",
         ("linkedin", "3004"): "SKIPPED", ("linkedin", "3005"): "DRY_RUN", ("linkedin", "3006"): "DRY_RUN",
-        # 5002 is relevant, but max_applications_per_run (10) is reached first: it stays queued for the next run
-        ("instahyre", "5001"): "DRY_RUN", ("instahyre", "5002"): "QUEUED", ("instahyre", "5003"): "ALREADY_APPLIED",
+        # both are relevant; jobs are applied best match first, so the React role (5002) goes before 5001 and
+        # max_applications_per_run (10) is reached before 5001: it stays queued for the next run
+        ("instahyre", "5001"): "QUEUED", ("instahyre", "5002"): "DRY_RUN", ("instahyre", "5003"): "ALREADY_APPLIED",
         ("instahyre", "5004"): "SKIPPED",
     }
     jobs = _jobs()
@@ -126,7 +127,8 @@ async def test_auto_apply_end_to_end(engine, site_server, clean_db):
         assert lever.application.ats_platform == "lever" and lever.application.confirmed
         manual = s.scalar(select(Job).where(Job.external_id == "10062000000"))
         assert "blood group" in manual.application.manual_action_reason
-        assert manual.application.submit_attempted and not manual.application.confirmed
+        # (the screening chat stopped on a question and the job still offers "Apply": nothing was sent)
+        assert not manual.application.submit_attempted and not manual.application.confirmed
         pending = s.scalars(select(QuestionAnswer).where(QuestionAnswer.needs_review.is_(True))).all()
         assert any("blood group" in q.question for q in pending)
         run = s.get(Run, summary["run_id"])
@@ -147,10 +149,11 @@ async def test_review_mode_with_dashboard_approvals(engine, site_server, clean_d
 
     summary = await _run(engine, site_server, "review", ["instahyre"], during=user)
     assert summary["status"] == "COMPLETED"
-    assert _status("instahyre", "5001") == "APPLIED"
-    assert _status("instahyre", "5002") == "SKIPPED"
+    # best match first: the React role (5002) is presented for approval before 5001
+    assert _status("instahyre", "5002") == "APPLIED"
+    assert _status("instahyre", "5001") == "SKIPPED"
     with session_scope() as s:
-        app = s.scalar(select(Job).where(Job.external_id == "5001")).application
+        app = s.scalar(select(Job).where(Job.external_id == "5002")).application
         assert app.review_decision == "approve" and app.confirmed
 
 
@@ -262,7 +265,8 @@ async def test_daily_limit_defers_applications(engine, site_server, clean_db, pr
     summary = await _run(engine, site_server, "dry_run", ["instahyre"])
     assert summary["stats"]["apply_attempts"] == 1
     assert summary["stats"]["deferred"] >= 1
-    assert _status("instahyre", "5002") == "QUEUED"  # kept for the next run
+    assert _status("instahyre", "5002") == "DRY_RUN"  # the best match used the only slot
+    assert _status("instahyre", "5001") == "QUEUED"  # kept for the next run
 
 
 async def test_login_expired_skips_portal_but_continues(engine, site_server, clean_db):
@@ -285,9 +289,13 @@ async def test_incomplete_profile_never_submits(engine, site_server, clean_db, m
                         lambda p: [ProfileIssue(field="personal.phone", message="Phone is a placeholder", severity="error")])
     summary = await _run(engine, site_server, "auto", ["instahyre"])
     assert summary["status"] == "COMPLETED"
-    assert _status("instahyre", "5001") == "MANUAL_ACTION_REQUIRED"
+    # relevant jobs stay queued (nothing is filled with placeholder data); you are told once
+    assert _status("instahyre", "5001") == "QUEUED" and _status("instahyre", "5002") == "QUEUED"
+    assert summary["stats"]["waiting_for_profile"] >= 2
     with session_scope() as s:
-        assert not any(a.submit_attempted for a in s.scalars(select(Application)))
+        assert not s.scalars(select(Application)).all()
+        ev = s.scalars(select(ApplicationEvent).where(ApplicationEvent.type == "profile_incomplete")).all()
+        assert ev and "Phone is a placeholder" in ev[0].message
 
 
 async def test_user_answer_then_retry_completes_application(engine, site_server, clean_db):
@@ -301,12 +309,13 @@ async def test_user_answer_then_retry_completes_application(engine, site_server,
     with TestClient(create_app()) as c:
         pending = c.get("/api/questions/pending").json()
         q = next(p for p in pending if "blood group" in p["question"])
-        assert c.post("/api/answers/memory", json={"question": q["question"], "answer": "O+"}).status_code == 200
         job_id = q["job_id"]
-        # a submit was already attempted on Naukri, so Retry needs an explicit force
-        assert c.post(f"/api/jobs/{job_id}/action", json={"action": "retry"}).status_code == 409
-        r = c.post(f"/api/jobs/{job_id}/action", json={"action": "retry", "force": True})
-        assert r.json()["status"] == "QUEUED"
+        saved = c.post("/api/answers/memory", json={"question": q["question"], "answer": "O+"})
+        assert saved.status_code == 200
+        # nothing had been sent (the chat stopped; Naukri still offered "Apply"), so answering the one question that
+        # blocked it puts the job back in the queue by itself - no Retry, no force
+        assert job_id in saved.json()["requeued_jobs"]
+        assert c.get(f"/api/jobs/{job_id}").json()["status"] == "QUEUED"
         assert all("blood group" not in p["question"] for p in c.get("/api/questions/pending").json())
     summary = await _run(engine, site_server, "auto", ["naukri"])
     assert summary["stats"]["result_applied"] >= 1

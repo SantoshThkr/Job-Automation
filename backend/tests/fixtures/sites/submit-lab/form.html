@@ -1,0 +1,71 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Apply - Frontend Engineer - LabCo</title></head><body>
+<main>
+<h1>Apply for Frontend Engineer</h1>
+<section class="job-description" id="job-description"><h2>About the role</h2>
+ <p>Build React and TypeScript interfaces. Application submitted candidates are reviewed every Friday; once your
+ application was sent you will hear from us within two weeks.</p></section>
+<form id="app">
+ <label for="nm">Full name *</label><input id="nm" name="name" required>
+ <label for="em">Email *</label><input id="em" name="email" type="email" required>
+ <label for="ph">Mobile number *</label><input id="ph" name="phone" type="tel" required>
+ <button type="submit" id="sub">Submit application</button>
+</form>
+<div id="out"></div>
+<dialog id="dlg"><h3>Application submitted</h3><p>The LabCo team will review it.</p><button>Close</button></dialog>
+</main>
+<script>
+  const mode = new URLSearchParams(location.search).get('mode') || 'none';
+  const form = document.getElementById('app'), out = document.getElementById('out');
+  // the real forms behind these modes (hawktech, nimbusnext, ackrolix, folksolution) take a resume; "...bare" ones do not
+  if (['cf7', 'cf7spam', 'cf7quiet', 'reachout', 'drupal'].includes(mode))
+    document.getElementById('sub').insertAdjacentHTML('beforebegin', '<label for="cv">Upload resume *</label><input id="cv" name="resume" type="file" required>');
+  window.SUBMITS = 0; let clicks = 0;
+  const post = async (r) => { const res = await fetch('/submit-lab/api/apply?r=' + r, { method: 'POST', body: '{}' }); try { return await res.json(); } catch (e) { return null; } };
+  form.onsubmit = async (e) => {
+    e.preventDefault(); clicks++;
+    if (mode === 'lostclick' && clicks === 1) return;           // the page was not ready: nothing at all happens
+    if (mode === 'sticky') return;                              // client-side refusal without any message (Sunrays)
+    window.SUBMITS++;
+    if (mode === 'thankyou') { await post('plain'); location.href = 'thank-you.html'; return; }      // Speckyfox
+    if (mode === 'redirect') { location.href = 'done.html?status=submitted'; return; }
+    if (mode === 'modal') { document.getElementById('dlg').showModal(); return; }
+    if (mode === 'message' || mode === 'lostclick') { form.hidden = true;
+      out.innerHTML = '<div class="alert alert-success" role="status">Your application has been received.</div>'; return; }
+    if (mode === 'reference') { form.hidden = true; out.innerHTML = '<p>Reference number: APP-2026-1234</p>'; return; }
+    if (mode === 'samepage') { form.outerHTML = '<h2>Thanks for applying!</h2>'; return; }
+    if (mode === 'network') { await post('ok'); return; }       // the ATS answers {"success": true, "applicationId": ...}
+    if (mode === 'none') { await post('plain'); return; }       // a request went out, nothing readable came back
+    if (mode === 'reset') { await post('plain'); form.reset(); return; }   // Brisk Mind: the form is simply cleared
+    if (mode === 'failed') { out.innerHTML = '<p class="text-red-500">Failed to submit application</p>'; return; }  // Onesofts
+    if (mode === 'servererror') { await post('fail'); document.body.innerHTML = '<h1>502 Bad Gateway</h1><hr><center>nginx</center>'; return; }
+    if (mode === 'captchapoll') {   // careerpage.co (run #15): reCAPTCHA keeps polling after the click, nothing else
+      setInterval(() => fetch('/submit-lab/recaptcha/api2/reload?k=lab', { method: 'POST', body: 'x' }).then(r => r.text()), 700);
+      return; }
+    if (mode === 'gotit') { await post('plain');   // yobitel.com (run #16): plain paragraphs, a curly apostrophe, a reference
+      form.outerHTML = '<div class="text-center"><div class="mx-auto rounded-full">\u2713</div><p class="font-heading mt-4">Thanks \u2014 we\u2019ve got it.</p>' +
+        '<p class="text-muted-foreground">Reference: <span class="font-mono">YA-01591</span></p>' +
+        '<p class="text-muted-foreground">A recruiter will review your application within 7 days. Replies come from careers@labco.test.</p></div>'; return; }
+    if (mode === 'popup') { await post('plain'); form.hidden = true;   // vikisol.in (run #11): a custom modal, no dialog role
+      out.innerHTML = '<div class="popup-modal" style="position:fixed;inset:20%;background:#fff"><h2>Congratulations, Asha Verma</h2>' +
+        '<p>Your application for <b>React.js Developer</b> has been received.</p><p>Our HR team or a relevant team member will ' +
+        'contact you within <b>48 hours</b>.</p><button>CLOSE</button></div>'; return; }
+    if (mode === 'slow') { document.getElementById('sub').textContent = 'Submitting...';   // knowforth.in (run #21)
+      await post('slow'); form.hidden = true;
+      out.innerHTML = '<div role="status">Your application has been submitted successfully.</div>'; return; }
+    if (mode === 'rsc') { await post('rsc'); return; }         // a Next.js server action answers {"ok":true, reference}
+    if (mode === 'rscspam') { await post('rscspam'); return; } // ... with no real reference
+    if (mode === 'jobref') { await post('plain');              // moved on to another job's page that shows its reference
+      history.pushState({}, '', 'other-job.html'); form.outerHTML = '<p>Reference: JR-12345</p><p>Senior Engineer, Platform</p>'; return; }
+    if (mode === 'cf7' || mode === 'cf7spam' || mode === 'cf7quiet') {   // WordPress Contact Form 7 (hawktech.co.in, run #23)
+      const r = await post(mode === 'cf7quiet' ? 'cf7' : mode); form.reset();
+      if (mode !== 'cf7quiet') out.innerHTML = '<div class="wpcf7-response-output" aria-hidden="true">' + r.message + '</div>';
+      return; }
+    if (mode === 'cf7bare') {   // the same answer from a form that took no resume: a message was sent, not an application
+      const r = await post('cf7'); form.reset();
+      out.innerHTML = '<div class="wpcf7-response-output" aria-hidden="true">' + r.message + '</div>'; return; }
+    if (mode === 'drupal') { location.href = 'confirmation.html?token=lB1lxLhB'; return; }   // folksolution.com (run #23)
+    if (mode === 'reachout') { await post('plain'); location.href = 'thanks-contact.html'; return; }   // ackrolix.com (run #23)
+    if (mode === 'unrelated') { await post('plain');
+      out.innerHTML = '<aside><p>Application submitted by 12 candidates today for similar roles.</p></aside>'; return; }
+  };
+</script></body></html>

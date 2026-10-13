@@ -1,0 +1,17 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Screening</title></head><body>
+<!-- Radio buttons whose choices cannot be read as text (icon-only cards, no value attribute): the browser reports
+     value "on" for each. That default must never be recorded as the choice's label. -->
+<form id="f">
+ <fieldset><legend>Are you comfortable working from the office?</legend>
+  <span class="card"><input type="radio" name="office"><img alt="" src="data:,"></span>
+  <span class="card"><input type="radio" name="office"><img alt="" src="data:,"></span>
+ </fieldset>
+ <fieldset><legend>Preferred shift</legend>
+  <span class="card"><input type="radio" name="shift" value="day"><img alt="" src="data:,"></span>
+  <span class="card"><input type="radio" name="shift" value="night"><img alt="" src="data:,"></span>
+ </fieldset>
+ <fieldset><legend>Open to relocation?</legend>
+  <label><input type="radio" name="relocate"> Yes</label>
+  <label><input type="radio" name="relocate"> No</label>
+ </fieldset>
+</form></body></html>

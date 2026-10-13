@@ -6,6 +6,8 @@
     python -m app.cli run --mode dry_run   # run the agent in the foreground
     python -m app.cli evaluate --title "React Developer" --jd-file jd.txt
     python -m app.cli answer "What is your notice period?"
+    python -m app.cli try-apply https://careers.example.com/jobs/123   # navigator on any job page (Dry Run)
+    python -m app.cli reevaluate [--ai] [--dry]   # re-score pending jobs with the current matcher
 """
 
 from __future__ import annotations
@@ -72,8 +74,56 @@ def cmd_check(_a) -> int:
         print("[OK] Playwright Chromium")
     except Exception as exc:
         ok = False
-        print(f"[FAIL] Playwright browser: {exc}\n       Run: playwright install chromium")
+        print(f"[FAIL] Playwright browser: {exc}\n       Run: .venv/bin/python -m playwright install chromium")
+    st = get_settings()
+    print(f"[{'OK' if st.navigator_enabled else 'OFF'}] Navigator for company sites"
+          f" (AI fallback {'on' if st.navigator_use_ai and st.ai_enabled else 'off'})")
+    if st.ats_account_password:
+        print("[OK] Employer-site account password set: sign-in"
+              + (" and account creation" if st.ats_create_accounts else "") + " handled automatically")
+    else:
+        print("[INFO] PJA_ATS_ACCOUNT_PASSWORD not set: you will be asked to sign in on employer career sites")
+    print(f"[INFO] Auto Apply waits {st.auto_human_wait_s}s for you before parking a job; notifications "
+          f"{'on' if st.notify else 'off'}")
     return 0 if ok else 1
+
+
+_STATE_MESSAGES = {
+    "AUTHENTICATED": "signed in",
+    "VERIFICATION": "LinkedIn security check (code / CAPTCHA / verification) - complete it in the browser window",
+    "LOGIN_PAGE": "sign-in page - enter your email and password",
+    "EXPIRED": "sign-in page (your previous session expired) - sign in again",
+    "LOGGED_OUT": "guest page - click 'Sign in'",
+    "UNKNOWN": "waiting for a LinkedIn page",
+}
+
+
+async def wait_for_linkedin_login(adapter, engine, timeout_s: int, *, poll_s: float = 2.0,
+                                  out=print) -> tuple[bool, object, list[str]]:
+    """Wait (without navigating the tab you are using) until LinkedIn shows an authenticated session.
+
+    Returns (signed_in, last LoginCheck, states seen). CAPTCHA / OTP / verification stay manual: a security
+    check is reported, never treated as success; the wait resumes by itself once you finish it."""
+    from app.portals.linkedin_session import LinkedInState
+
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    end = start + timeout_s
+    history: list[str] = []
+    check = None
+    while loop.time() < end:
+        if not engine.alive:
+            out("The browser window was closed before the sign-in was detected.")
+            return False, check, history
+        check = await adapter.login_state(navigate=False)
+        if not history or history[-1] != check.state.value:
+            history.append(check.state.value)
+            where = f" ({check.url})" if check.url else ""
+            out(f"  [{int(loop.time() - start):>3}s] {_STATE_MESSAGES[check.state.value]}{where}")
+        if check.state == LinkedInState.AUTHENTICATED:
+            return True, check, history
+        await asyncio.sleep(poll_s)
+    return False, check, history
 
 
 def cmd_login(a) -> int:
@@ -84,28 +134,61 @@ def cmd_login(a) -> int:
         print(f"Unknown portal {a.portal}; choose from {', '.join(PORTALS)}")
         return 2
 
+    async def run_linkedin(adapter, engine) -> int:
+        from app.portals.linkedin_session import LinkedInState, guidance
+
+        first = await adapter.login_state(navigate=True)
+        if first.authenticated:
+            print(f"Already logged in to LinkedIn ({', '.join(first.signals)}). "
+                  f"Session is saved in {engine.user_data_dir}")
+            return 0
+        if first.state != LinkedInState.VERIFICATION:  # never navigate away from a security check
+            await engine.goto(adapter.login_url)
+        print("Log in to LinkedIn in the browser window (complete any OTP/CAPTCHA/verification yourself).")
+        print(f"Waiting up to {a.timeout} seconds - progress is shown below:")
+        ok, check, history = await wait_for_linkedin_login(adapter, engine, a.timeout)
+        if ok:
+            print(f"Logged in to LinkedIn ({', '.join(check.signals)}).")
+            print(f"The session is saved in {engine.user_data_dir} and reused by the agent.")
+            await asyncio.sleep(2)  # let the browser write the session to the profile
+            return 0
+        if check is not None:
+            print(f"LinkedIn sign-in was not detected within {a.timeout} s.")
+            print(f"  Last state seen : {check.describe()}")
+            print(f"  States seen     : {' -> '.join(history) or '-'}")
+            hint = guidance(check, history)
+            if hint:
+                print(f"  What to do      : {hint}")
+        return 1
+
+    async def run_generic(adapter, engine) -> int:
+        if await adapter.is_logged_in():
+            print(f"Already logged in to {adapter.display_name}. Session is saved in {engine.user_data_dir}")
+            return 0
+        await engine.goto(adapter.login_url)
+        print(f"Log in to {adapter.display_name} in the browser window (complete any OTP/CAPTCHA).")
+        print(f"Waiting up to {a.timeout} seconds...")
+        loop = asyncio.get_running_loop()
+        end = loop.time() + a.timeout
+        while loop.time() < end:
+            if await adapter.is_logged_in(navigate=False):
+                print("Logged in. The session is saved for the agent.")
+                await asyncio.sleep(2)
+                return 0
+            await asyncio.sleep(2)
+        url = engine.page.url if engine.alive and not engine.page.is_closed() else "browser closed"
+        print(f"Timed out waiting for {adapter.display_name} login. The browser was on: {url.split('?')[0]}")
+        return 1
+
     async def run() -> int:
         engine = BrowserEngine(headless=False)
         await engine.start()
         adapter = create_adapter(a.portal, engine)
         assert adapter is not None
         try:
-            if await adapter.is_logged_in():
-                print(f"Already logged in to {adapter.display_name}. Session is saved in {engine.user_data_dir}")
-                return 0
-            await engine.goto(adapter.login_url)
-            print(f"Log in to {adapter.display_name} in the browser window (complete any OTP/CAPTCHA).")
-            print(f"Waiting up to {a.timeout} seconds...")
-            loop = asyncio.get_running_loop()
-            end = loop.time() + a.timeout
-            while loop.time() < end:
-                if await adapter.is_logged_in(navigate=False):
-                    print("Logged in. The session is saved for the agent.")
-                    await asyncio.sleep(2)
-                    return 0
-                await asyncio.sleep(2)
-            print("Timed out waiting for login.")
-            return 1
+            if hasattr(adapter, "login_state"):
+                return await run_linkedin(adapter, engine)
+            return await run_generic(adapter, engine)
         finally:
             await engine.stop()
 
@@ -150,14 +233,273 @@ def cmd_evaluate(a) -> int:
 
 def cmd_answer(a) -> int:
     from app.ai.job_assistant import JobAssistant
-    from app.answers.answerer import Answerer
+    from app.answers.answerer import MODE_LABEL, Answerer, describe_sources
     from app.answers.question_bank import QuestionContext
+    from app.engine.recorder import memory_lookup_fn
+    from app.matching.analyzer import JobInput
     from app.profile import get_profile
 
-    ans = asyncio.run(Answerer(get_profile(), JobAssistant() if a.ai else None).answer(
-        QuestionContext(question=a.question, field_type=a.type, options=a.options or [], required=True)))
-    print(json.dumps({"answer": ans.value, "confidence": round(ans.confidence, 3), "source": ans.source,
-                      "needs_review": ans.needs_review, "note": ans.note}, indent=2))
+    job = JobInput(title=a.job_title, company=a.company, description=a.jd or "") if a.job_title else None
+    ans = asyncio.run(Answerer(get_profile(), JobAssistant() if a.ai else None, memory_lookup=memory_lookup_fn()).answer(
+        QuestionContext(question=a.question, field_type=a.type, options=a.options or [], required=True, job=job)))
+    print(json.dumps({"answer": ans.value, "category": ans.category, "mode": MODE_LABEL.get(ans.mode, ans.mode),
+                      "answer_source": describe_sources(ans.sources), "sources": ans.sources,
+                      "confidence": round(ans.confidence, 3), "asks_you": ans.needs_review, "note": ans.note},
+                     indent=2, ensure_ascii=False))
+    return 0
+
+
+class ConsoleGate:
+    """Human gate for the terminal: you answer questions / approve / confirm you finished a step."""
+
+    def __init__(self) -> None:
+        self.last_answers: dict[str, str] = {}
+
+    async def wait(self, kind, reason, *, page=None, detect_done=None, timeout_s=None, payload=None):
+        from app.engine.context import GateResult
+
+        self.last_answers = {}
+        print(f"\n>>> NEEDS YOU ({kind}): {reason}")
+        if kind == "questions" and payload:
+            for q in payload.get("questions", []):
+                opts = f" {q['options']}" if q.get("options") else ""
+                hint = f" [suggested: {q['suggested']}]" if q.get("suggested") else ""
+                ans = (await asyncio.to_thread(input, f"    {q['question']}{opts}{hint}: ")).strip()
+                if ans or q.get("suggested"):
+                    self.last_answers[q["id"]] = ans or q["suggested"]
+            return GateResult.RESOLVED
+        prompt = "    Approve and submit? [y/N] " if kind == "review" else \
+            "    Do it in the browser window, then press Enter (or type 's' to skip this job): "
+        ans = (await asyncio.to_thread(input, prompt)).strip().lower()
+        if kind == "review":
+            return GateResult.APPROVE if ans in {"y", "yes"} else GateResult.REJECT
+        return GateResult.REJECT if ans == "s" else GateResult.RESOLVED
+
+
+def cmd_try_apply(a) -> int:
+    """Run the application navigator on one job URL (company career page or any application form)."""
+    from app.ai.job_assistant import JobAssistant
+    from app.answers.answerer import Answerer
+    from app.ats.external import apply_external
+    from app.browser.engine import BrowserEngine
+    from app.db import init_db, session_scope
+    from app.engine.context import ApplyContext
+    from app.engine.recorder import memory_lookup_fn, remember_answer
+    from app.models import AgentMode
+    from app.portals.types import JobPosting
+    from app.profile import blocking_issues, get_profile
+    from app.resumes import select_resume
+
+    init_db()
+    profile = get_profile()
+    mode = AgentMode(a.mode)
+    blockers = [i.message for i in blocking_issues(profile)]
+    if blockers and mode != AgentMode.DRY_RUN:
+        print("Profile incomplete - submissions are blocked:\n  - " + "\n  - ".join(blockers))
+    resume = select_resume(profile, a.resume_category, [])
+    job = JobPosting(portal="web", external_id=a.url, url=a.url, title=a.title, company=a.company)
+    assistant = JobAssistant() if get_settings().ai_enabled else None
+
+    async def log_event(type_, message, level="info", data=None):
+        if type_ not in {"step"}:
+            print(f"  [{type_}] {message}")
+
+    async def on_step(description, url):
+        print(f"  -> {description}")
+
+    async def remember(question, answer):
+        with session_scope() as s:
+            remember_answer(s, question, answer)
+
+    async def run() -> int:
+        engine = BrowserEngine(headless=a.headless)
+        await engine.start()
+        try:
+            ctx = ApplyContext(engine=engine, profile=profile,
+                               answerer=Answerer(profile, assistant, memory_lookup=memory_lookup_fn()),
+                               mode=mode, job=job, resume_path=resume.absolute_path if resume else None,
+                               gate=ConsoleGate(), log_event=log_event, submit_blockers=blockers,
+                               on_step=on_step, remember=remember, auto_human_wait_s=600)
+            page = await engine.goto(a.url)
+            result = await apply_external(engine, page, ctx)
+            print(f"\nResult: {result.outcome.value} - {result.message}")
+            if result.confirmation_text:
+                print(f"Confirmation: {result.confirmation_text}")
+            if result.unresolved:
+                print("Unanswered: " + "; ".join(result.unresolved))
+            for q, ans in ctx.answers_log:
+                flag = " (needs review)" if ans.needs_review else ""
+                print(f"  Q: {q.question[:70]!r} -> {ans.value!r} [{ans.source}]{flag}")
+            if a.keep_open:
+                await asyncio.to_thread(input, "\nPress Enter to close the browser...")
+            return 0
+        finally:
+            await engine.stop()
+
+    return asyncio.run(run())
+
+
+_RETRYABLE_REASONS = ("Unknown application platform", "Profile incomplete", "Not submitted - needs your review",
+                      "Could not find the Apply button")
+
+
+def cmd_reevaluate(a) -> int:
+    """Re-score jobs that are still pending with the current matcher; re-queue jobs parked only for reasons the
+    assistant now handles (unknown company site, incomplete profile). Never touches anything that was submitted."""
+    from sqlalchemy import select
+
+    from app.ai.job_assistant import JobAssistant
+    from app.db import init_db, session_scope
+    from app.engine.recorder import add_event, save_match, set_status
+    from app.matching.analyzer import JobInput
+    from app.matching.matcher import JobMatcher
+    from app.matching.rules import title_prescreen
+    from app.models import Decision, Job, JobStatus
+    from app.profile import get_profile
+
+    init_db()
+    profile = get_profile()
+    matcher = JobMatcher(profile, JobAssistant() if a.ai else None)
+    pending = {JobStatus.NEW, JobStatus.QUEUED, JobStatus.REVIEW_PENDING, JobStatus.MANUAL_ACTION_REQUIRED,
+               JobStatus.DRY_RUN}
+    changes: dict[str, int] = {}
+    with session_scope() as s:
+        jobs = s.scalars(select(Job).where(Job.status.in_(list(pending)))).all()
+        for job in jobs:
+            app = job.application
+            if job.status == JobStatus.MANUAL_ACTION_REQUIRED and (
+                    (app is not None and app.submit_attempted)
+                    or not any(r in (job.status_reason or "") for r in _RETRYABLE_REASONS)):
+                continue  # needs you for a real reason, or something may have been submitted
+            early = title_prescreen(profile, job.title)
+            if early:
+                result = None
+                decision, why = Decision.SKIP, "; ".join(early)
+            else:
+                result = asyncio.run(matcher.evaluate(JobInput(
+                    title=job.title, description=job.description, company=job.company, location=job.location,
+                    experience_text=job.experience_text, salary_text=job.salary_text, skills=job.skills or [])))
+                decision = Decision(result.decision)
+                why = "; ".join(result.blockers or result.flags or result.reasons[:1])
+            new_status = {Decision.APPLY: JobStatus.QUEUED, Decision.SKIP: JobStatus.SKIPPED,
+                          Decision.MANUAL_REVIEW: JobStatus.REVIEW_PENDING}[decision]
+            if job.status == JobStatus.DRY_RUN and new_status == JobStatus.QUEUED:
+                continue  # dry-run results stay as they are; approve them from the dashboard to apply
+            key = f"{job.status} -> {new_status}"
+            if job.status != new_status or result is not None:
+                changes[key] = changes.get(key, 0) + 1
+            if a.dry:
+                continue
+            if result is not None:
+                save_match(s, job, result.to_dict())
+            if job.status != new_status:
+                set_status(s, job, new_status, f"Re-evaluated: {why}"[:1000])
+                add_event(s, job.id, "reevaluated", f"Re-evaluated with the current matcher: {decision.value} ({why})"[:1000])
+    for k, v in sorted(changes.items()):
+        print(f"{v:4}  {k}")
+    print("(dry run: nothing changed)" if a.dry else "Done.")
+    return 0
+
+
+_EXP_Q = __import__("re").compile(r"years?|experience|\byoe\b|months?\s+of", __import__("re").I)
+_STATE = {"APPLIED": "APPLIED", "MANUAL_ACTION_REQUIRED": "NEEDS_YOU", "AWAITING_APPROVAL": "NEEDS_YOU",
+          "FAILED": "FAILED", "SKIPPED": "SKIPPED", "ALREADY_APPLIED": "SKIPPED", "EXPIRED": "SKIPPED",
+          "DUPLICATE": "SKIPPED", "DRY_RUN": "SKIPPED", "QUEUED": "NEEDS_YOU", "PARKED": "NEEDS_YOU"}
+
+
+def attempt_records(run_id: int) -> list[dict]:
+    """Everything recorded about each application attempted in ``run_id`` (one dict per attempt)."""
+    from sqlalchemy import select
+
+    from app.db import session_scope
+    from app.models import ApplicationEvent, Job
+
+    out = []
+    with session_scope() as s:
+        job_ids = list(dict.fromkeys(e.job_id for e in s.scalars(
+            select(ApplicationEvent).where(ApplicationEvent.run_id == run_id, ApplicationEvent.type.in_(
+                ["apply_started", "verify_started"])).order_by(ApplicationEvent.id))))
+        for jid in job_ids:
+            job = s.get(Job, jid)
+            app = job.application
+            evs = s.scalars(select(ApplicationEvent).where(ApplicationEvent.job_id == jid,
+                                                          ApplicationEvent.run_id == run_id)
+                            .order_by(ApplicationEvent.id)).all()
+            started = next((e.id for e in evs if e.type in {"apply_started", "verify_started"}), 0)
+            evs = [e for e in evs if e.id >= started]
+            qas = [q for q in (app.answers if app else []) if q.created_at and evs and q.created_at >= evs[0].ts]
+            exp = [{"question": q.question, "type": q.field_type, "options": (q.options or [])[:12], "entered": q.answer,
+                    "verified": q.verified, "source": q.source, "note": q.note}
+                   for q in qas if _EXP_Q.search(q.question or "") and (q.category or "") in {"EXPERIENCE", "UNKNOWN", ""}
+                   or "entered as" in (q.note or "") or "experience levels" in (q.note or "")]
+            submission = next((e for e in reversed(evs) if e.type == "submission"), None)
+            after = next((e.data or {} for e in reversed(evs) if e.type == "resource"
+                          and (e.data or {}).get("phase") == "after"), {})
+            out.append({
+                "portal": job.portal, "company": job.company, "title": job.title, "job_url": job.url,
+                "application_url": (app.final_url if app else "") or "",
+                "target": (app.apply_target if app else "") or "portal", "ats": (app.ats_platform if app else "") or "",
+                "steps": sum(1 for e in evs if e.type == "step" and ("Next step" in e.message or "Filling" in e.message)) + 1,
+                "questions": [f"{q.question} = {q.answer or '-'} [{q.source}]" for q in qas],
+                "questions_needing_you": [q.question for q in qas if q.needs_review and q.required],
+                "experience_fields": exp,
+                "validation_failed": [f"{q.question}: {q.note}" for q in qas if "could not" in (q.note or "")
+                                      or "did not accept" in (q.note or "")],
+                "submit_reached": any(e.type == "submit" for e in evs),
+                "submit_clicked": bool(app and app.submit_attempted),
+                "after_submit": submission.message if submission else "",
+                "confirmation": (app.verification_evidence if app else []) or [],
+                "verification": (app.verification_state if app else "") or "",
+                "final_state": _STATE.get(job.status, job.status), "status": job.status,
+                "reason": job.status_reason if job.status != "APPLIED" else "",
+                "confirmation_text": (app.confirmation_text if app else "") or "",
+                "screenshot": next((e.screenshot for e in reversed(evs) if e.screenshot), "") or "",
+                "errors": [e.message for e in evs if e.level == "error"][:3],
+                "resources": {k: (round(v) if isinstance(v, float) else v) for k, v in after.items()
+                              if k in {"application", "pages", "chromium_processes", "chromium_rss_mb",
+                                       "renderer_max_mb", "python_rss_mb", "listeners", "tasks"}},
+            })
+    return out
+
+
+def cmd_attempts(a) -> int:
+    import json
+
+    from app.db import init_db
+
+    init_db()  # adds new columns to an older database
+
+    rows = attempt_records(a.run)
+    if a.json:
+        print(json.dumps(rows, indent=1, default=str))
+        return 0
+    for r in rows:
+        print(f"{r['final_state']:9} {r['portal']:9} {r['target']:8} {r['company'][:28]:28} {r['title'][:40]:40} "
+              f"{(r['ats'] or '')[:24]:24} {r['reason'][:110]}")
+    return 0
+
+
+def cmd_resources(a) -> int:
+    """[RESOURCE] samples of a run: run start, every 10 jobs read, before/after each application, run end."""
+    from sqlalchemy import select
+
+    from app.db import init_db, session_scope
+    from app.models import ApplicationEvent
+
+    init_db()
+    with session_scope() as s:
+        rows = [e.data or {} for e in s.scalars(select(ApplicationEvent).where(
+            ApplicationEvent.run_id == a.run, ApplicationEvent.type == "resource").order_by(ApplicationEvent.id))]
+    marks = {1, 5, 10, 15, 20, 25, 30}
+    for d in rows:
+        phase = d.get("phase", "")
+        app = d.get("application")
+        if a.all or phase in {"run_start", "run_end", "discovery"} or (phase == "after" and app in marks):
+            tag = f"{phase}" + (f" app={app}" if app is not None else "") + (f" read={d.get('discovered')}"
+                                                                           if d.get("discovered") else "")
+            print(f"{tag:22} pages={d.get('pages')} chromium_processes={d.get('chromium_processes')} "
+                  f"chromium_rss_mb={d.get('chromium_rss_mb', 0):.0f} renderer_max_mb={d.get('renderer_max_mb', 0):.0f} "
+                  f"python_rss_mb={d.get('python_rss_mb', 0):.0f} listeners={d.get('listeners')} tasks={d.get('tasks')}")
     return 0
 
 
@@ -189,9 +531,42 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--type", default="text")
     ap.add_argument("--options", nargs="*")
     ap.add_argument("--ai", action="store_true")
+    ap.add_argument("--job-title", default="", help="job context for written answers")
+    ap.add_argument("--company", default="")
+    ap.add_argument("--jd", default="", help="job description text")
     ap.set_defaults(fn=cmd_answer)
+    tp = sub.add_parser("try-apply", help="run the application navigator on one job URL")
+    tp.add_argument("url")
+    tp.add_argument("--mode", choices=["dry_run", "review", "auto"], default="dry_run")
+    tp.add_argument("--title", default="Frontend Engineer")
+    tp.add_argument("--company", default="")
+    tp.add_argument("--resume-category", default="frontend", choices=["frontend", "fullstack", "ai"])
+    tp.add_argument("--keep-open", action="store_true", help="keep the browser open at the end")
+    tp.add_argument("--headless", action="store_true", help="no visible browser window (you cannot help it then)")
+    tp.set_defaults(fn=cmd_try_apply)
+    rv = sub.add_parser("reevaluate", help="re-score pending jobs with the current matcher")
+    rv.add_argument("--ai", action="store_true", help="also ask the local model (slower)")
+    rv.add_argument("--dry", action="store_true", help="only show what would change")
+    rv.set_defaults(fn=cmd_reevaluate)
+    at = sub.add_parser("attempts", help="what happened in every application of a run")
+    at.add_argument("--run", type=int, required=True)
+    at.add_argument("--json", action="store_true")
+    at.set_defaults(fn=cmd_attempts)
+    rs = sub.add_parser("resources", help="browser / memory samples of a run")
+    rs.add_argument("--run", type=int, required=True)
+    rs.add_argument("--all", action="store_true")
+    rs.set_defaults(fn=cmd_resources)
     a = p.parse_args(argv)
-    return a.fn(a)
+    import os
+
+    from app.config import ConfigError
+
+    os.umask(0o077)  # anything a command creates (profile, database, logs) is private to your account
+    try:
+        return a.fn(a)
+    except ConfigError as exc:
+        sys.stderr.write(f"\n{exc}\n")
+        return 2
 
 
 if __name__ == "__main__":

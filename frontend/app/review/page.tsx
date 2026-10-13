@@ -1,27 +1,36 @@
 "use client";
 
 import Link from "next/link";
-import { AnswerForm } from "@/components/AnswerForm";
+import { useEffect, useState } from "react";
 import { GateBanner } from "@/components/GateBanner";
-import { Score, StatusBadge } from "@/components/StatusBadge";
+import { NeedsYouCard } from "@/components/NeedsYouCard";
+import { Score } from "@/components/StatusBadge";
 import { JobSummary, api } from "@/lib/api";
 import { useAction, usePoll } from "@/lib/hooks";
-import { PORTAL_LABEL, fmtDate } from "@/lib/format";
+import { PORTAL_LABEL, uniqueById } from "@/lib/format";
 
 export default function ReviewPage() {
+  const [showParked, setShowParked] = useState(false);
   const agent = usePoll(api.agent, 2000);
   const decide = usePoll(() => api.jobs({ status: "REVIEW_PENDING", sort: "score", page_size: 100 }), 5000);
-  const manual = usePoll(() => api.jobs({ status: "MANUAL_ACTION_REQUIRED,AWAITING_APPROVAL", sort: "updated", page_size: 100 }), 5000);
-  const questions = usePoll(api.pendingQuestions, 6000);
-  const refresh = () => { agent.refresh(); decide.refresh(); manual.refresh(); questions.refresh(); };
+  const needs = usePoll(() => api.needsYou(showParked), 5000, [showParked]);
+  const refresh = () => { agent.refresh(); decide.refresh(); needs.refresh(); };
 
-  const nothing = !agent.data?.gate_kind && !decide.data?.items.length && !manual.data?.items.length && !questions.data?.length;
+  // One card per job: job_id is the record's primary key (the API returns each waiting job once). Should it ever
+  // repeat an id, that is the same record twice - shown once and reported, not hidden.
+  const { items, duplicates } = uniqueById(needs.data?.items ?? [], (it) => it.job_id);
+  const repeated = duplicates.join(",");
+  useEffect(() => {
+    if (repeated) console.warn(`/api/needs-you returned the same job more than once (job_id ${repeated})`);
+  }, [repeated]);
+  const nothing = !agent.data?.gate_kind && !decide.data?.items.length && !items.length;
+  const kinds = Object.entries(needs.data?.by_kind ?? {}).sort((a, b) => b[1] - a[1]);
   return (
     <>
       <div className="page-head">
         <div>
           <h1>Needs you</h1>
-          <p className="sub">Decisions, answers and manual steps the assistant will not guess.</p>
+          <p className="sub">Only what the assistant cannot do truthfully on its own: each item says what is missing and what happens when you answer.</p>
         </div>
       </div>
       <GateBanner agent={agent.data} onChange={refresh} />
@@ -35,33 +44,21 @@ export default function ReviewPage() {
         </div>
       )}
 
-      {!!questions.data?.length && (
-        <div className="card">
-          <h2>Questions to answer ({questions.data.length})</h2>
-          <p className="muted small">Your answer is saved and reused automatically on future forms. Then press Retry on the job.</p>
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>Question</th><th>Asked by</th><th>Your answer</th></tr></thead>
-              <tbody>
-                {questions.data.map((qa) => (
-                  <tr key={qa.id}>
-                    <td>{qa.question}{qa.note && <div className="muted small">{qa.note}</div>}</td>
-                    <td className="small"><Link href={`/jobs/${qa.job_id}`}>{qa.job_company} · {qa.job_title}</Link></td>
-                    <td><AnswerForm qa={qa} onSaved={refresh} /></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      {(!!items.length || !!needs.data?.parked) && (
+        <div className="row" style={{ justifyContent: "space-between", margin: "8px 0" }}>
+          <div className="row small">
+            <strong>{items.length} application(s) waiting</strong>
+            {kinds.map(([k, n]) => <span key={k} className="chip">{k.replace("_", " ")}: {n}</span>)}
           </div>
+          {!!needs.data?.parked && (
+            <label className="small row">
+              <input type="checkbox" checked={showParked} onChange={(e) => setShowParked(e.target.checked)} />
+              Show {needs.data.parked} parked
+            </label>
+          )}
         </div>
       )}
-
-      {!!manual.data?.items.length && (
-        <div className="card">
-          <h2>Manual action required ({manual.data.total})</h2>
-          <ManualTable jobs={manual.data.items} onDone={refresh} />
-        </div>
-      )}
+      {items.map((it) => <NeedsYouCard key={it.job_id} item={it} onChange={refresh} />)}
     </>
   );
 }
@@ -90,41 +87,5 @@ function DecisionTable({ jobs, onDone }: { jobs: JobSummary[]; onDone: () => voi
         </tbody>
       </table>
     </div>
-  );
-}
-
-function ManualTable({ jobs, onDone }: { jobs: JobSummary[]; onDone: () => void }) {
-  const { busy, run, error } = useAction();
-  const act = (id: number, action: string, extra = {}) => async () => {
-    if (action === "mark_applied" && !window.confirm("Mark as applied (you finished it yourself)?")) return;
-    await run(() => api.jobAction(id, action, extra));
-    onDone();
-  };
-  return (
-    <>
-      {error && <p className="small lvl-error">{error}</p>}
-      <div className="table-wrap">
-        <table>
-          <thead><tr><th>Company</th><th>Role</th><th>Status</th><th>What happened</th><th>Updated</th><th /></tr></thead>
-          <tbody>
-            {jobs.map((j) => (
-              <tr key={j.id}>
-                <td>{j.company}</td>
-                <td><Link href={`/jobs/${j.id}`}>{j.title}</Link><div className="muted small">{PORTAL_LABEL[j.portal]}{j.ats_platform && ` → ${j.ats_platform}`}</div></td>
-                <td><StatusBadge status={j.status} /></td>
-                <td className="small">{j.status_reason}</td>
-                <td className="small">{fmtDate(j.updated_at)}</td>
-                <td><div className="row">
-                  <a className="btn small" href={j.url} target="_blank" rel="noreferrer">Open</a>
-                  <button className="btn small" disabled={busy} onClick={act(j.id, "retry")}>Retry</button>
-                  <button className="btn small" disabled={busy} onClick={act(j.id, "mark_applied")}>Applied</button>
-                  <button className="btn small" disabled={busy} onClick={act(j.id, "skip")}>Skip</button>
-                </div></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </>
   );
 }

@@ -6,6 +6,7 @@ Easy Apply drafts are discarded whenever we stop before submitting (dry run, rej
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import AsyncIterator
@@ -18,16 +19,16 @@ from app.browser.errors import LoginRequired
 from app.browser.forms import FormFiller, collect_errors, summarize_unresolved
 from app.browser.selectors import T
 from app.engine.context import ApplyContext, GateResult, SubmitDecision
+from app.engine.questions import ask_and_fill
+from app.engine.submission import SubmissionState, SubmissionWatcher
 from app.portals.base import PortalAdapter, SearchQuery
-from app.portals.common import extract_cards, first_text, page_has_success
+from app.portals.common import extract_cards, first_text
+from app.portals.linkedin_session import LinkedInSession, LinkedInState, LoginCheck, classify_page
 from app.portals.types import ApplyOutcome, ApplyResult, JobPosting
 
 log = logging.getLogger(__name__)
 
-LOGGED_IN = T("linkedin logged in", css=[".global-nav__me", "img.global-nav__me-photo", "#global-nav .global-nav__me",
-                                        "[data-control-name='nav.settings']", "nav.global-nav"])
-LOGGED_OUT = T("linkedin logged out", css=["form.login__form", "#username", "a.nav__button-secondary",
-                                           "[data-tracking-control-name='guest_homepage-basic_nav-header-signin']"])
+# Sign-in state is decided from several signals in portals/linkedin_session.py (cookie, URL, page, all tabs).
 
 CARD_SELECTORS = ["li[data-occludable-job-id]", "div.job-card-container[data-job-id]", "li.jobs-search-results__list-item",
                   "li.scaffold-layout__list-item", "div[data-job-id]"]
@@ -56,34 +57,89 @@ DETAIL_LOCATION = [".job-details-jobs-unified-top-card__primary-description-cont
                    ".job-details-jobs-unified-top-card__tertiary-description-container span"]
 DETAIL_JD = ["#job-details", ".jobs-description__content", ".jobs-description-content__text",
              ".show-more-less-html__markup", ".description__text"]
+# 2026 job page: generated class names, no <h1>; stable hooks are data-view-name attributes and the headings.
+DETAIL_PAGE = "[data-view-name='job-detail-page']"
+DETAIL_JS = r"""(root) => {
+  const T = e => (e && e.innerText || '').trim();
+  const scope = document.querySelector(root) || document.querySelector('main') || document.body;
+  const heads = Array.from(scope.querySelectorAll('h1, h2, h3, h4, span, p, div'))
+    .filter(e => /^about\s+the\s+job$/i.test(T(e)) && e.children.length <= 2);
+  let jd = '';
+  if (heads.length) {
+    let box = heads[0];
+    while (box.parentElement && box !== scope && T(box).length < T(heads[0]).length + 200) box = box.parentElement;
+    jd = T(box).replace(/^\s*about\s+the\s+job\s*/i, '');
+  }
+  const parts = document.title.replace(/^\(\d+\+?\)\s*/, '').split(' | ').map(x => x.trim());  // "(3) Title | Co | LinkedIn"
+  return {jd: jd.slice(0, 20000), title: parts.length >= 3 ? parts[0] : '', company: parts.length >= 3 ? parts[1] : ''};
+}"""
 
 APPLY_BTN = T("linkedin apply", css=["button.jobs-apply-button", ".jobs-apply-button--top-card button",
-                                     "button[aria-label*='Easy Apply']", "button[aria-label*='Apply to']"],
-              role=("button", r"^\s*(easy\s+)?apply\b"))
+                                     "[data-view-name='job-apply-button']",
+                                     "button[aria-label*='Easy Apply']", "button[aria-label*='Apply to']",
+                                     # 2026: the control is often a link, sometimes without the data-view-name hook
+                                     "a[aria-label^='Easy Apply' i]", "a[aria-label*='Apply on company' i]",
+                                     "a[aria-label^='Apply to' i]"],
+              role=[("button", r"^\s*(easy\s+)?apply\b"), ("link", r"^\s*easy\s+apply\b")])
 APPLIED_STATE = T("linkedin applied", css=[".artdeco-inline-feedback--success", ".post-apply-timeline__entity",
                                            ".jobs-s-apply__application-link"],
                   within_text=["/^\\s*Applied\\s+\\d+\\s+(?:second|minute|hour|day|week|month)s?\\s+ago/i",
                                "/^\\s*Application submitted\\s*$/i"])
+APPLIED_TEXT = T("linkedin applied text", within_text=list(APPLIED_STATE.within_text))  # job page after submitting
 NO_LONGER = T("closed", within_text=["No longer accepting applications"])
 
+# 2026 Easy Apply: a native <dialog open data-testid="dialog" aria-labelledby="dialog-header"> (no role attribute)
 MODAL = T("easy apply modal", css=[".jobs-easy-apply-modal", "div[data-test-modal][role='dialog']",
-                                   "div.artdeco-modal[role='dialog']", "[role='dialog']"])
+                                   "div.artdeco-modal[role='dialog']", "dialog[open][data-testid='dialog']",
+                                   "dialog[open][aria-labelledby='dialog-header']", "dialog[open]", "[role='dialog']"])
 NEXT_BTN = T("next", css=["button[aria-label='Continue to next step']", "button[data-easy-apply-next-button]",
-                          "button[data-live-test-easy-apply-next-button]"], role=("button", r"^\s*next\s*$"))
+                          "button[data-live-test-easy-apply-next-button]", "button[data-view-name='continue-unify']"],
+             role=("button", r"^\s*next\s*$"))
 REVIEW_BTN = T("review", css=["button[aria-label='Review your application']", "button[data-live-test-easy-apply-review-button]"],
                role=("button", r"^\s*review\s*$"))
 SUBMIT_BTN = T("submit", css=["button[aria-label='Submit application']", "button[data-live-test-easy-apply-submit-button]"],
                role=("button", r"^\s*submit\s+application\s*$"))
-DISMISS = T("dismiss", css=["button[aria-label='Dismiss']", "button.artdeco-modal__dismiss"])
+DISMISS = T("dismiss", css=["button[aria-label='Dismiss']", "button.artdeco-modal__dismiss"], role=("button", r"^\s*dismiss\s*$"))
 DISCARD = T("discard", css=["button[data-control-name='discard_application_confirm_btn']",
                             "button[data-test-dialog-secondary-btn]"], text=["Discard"])
 POST_APPLY = T("post apply", css=["[data-test-modal-id='post-apply-modal']", ".jobs-post-apply-modal",
-                                  "#post-apply-modal"],
-               within_text=["Your application was sent", "Application sent"])
+                                  "#post-apply-modal"])
+# LinkedIn's own confirmation, read only inside dialogs / status messages (never from the job description text)
+CONFIRMATION_JS = r"""() => {
+  const rx = /your application was sent|application (?:was )?sent\b|application (?:was )?submitted/i;
+  const boxes = document.querySelectorAll("dialog[open], [role=dialog], [role=alertdialog], [role=alert], [role=status], "
+    + "[data-test-modal-id='post-apply-modal'], .jobs-post-apply-modal, #post-apply-modal, .artdeco-toast-item");
+  for (const b of boxes) {
+    if (!b.getClientRects().length) continue;
+    const t = (b.innerText || '').replace(/\s+/g, ' ').trim();
+    const m = t.match(rx);
+    if (m) {
+      const lines = (b.innerText || '').split('\n').map(x => x.trim()).filter(Boolean);
+      return lines.find(x => /your application was sent/i.test(x)) || lines.find(x => rx.test(x)) || m[0];
+    }
+  }
+  return '';
+}"""
 FOLLOW_COMPANY = "input#follow-company-checkbox, input[id*='follow-company']"
 RESUME_CARDS = ".jobs-document-upload-redesign-card__container, .jobs-resume-picker__resume"
 CONTINUE_EXTERNAL = T("continue to company site", css=["[role='dialog'] button.artdeco-button--primary"],
                       text=["Continue", "Continue applying"])
+
+
+_SAYS_SENT = re.compile(r"application\s+(?:was\s+)?(?:sent|submitted)|\bapplied\b", re.I)
+
+
+def confirmation_line(text: str, seen: str = "") -> str:
+    """The line to quote as LinkedIn's confirmation: the one that says the application was sent - from what is on the
+    page now, else from what was shown when the submit was verified (``seen``). The post-apply panel starts with
+    other headings ("Next best action"), which say nothing by themselves."""
+    for source in (text, seen):
+        lines = [ln.strip() for ln in (source or "").splitlines() if ln.strip()]
+        said = next((ln for ln in lines if _SAYS_SENT.search(ln)), "")
+        if said:
+            return said
+    lines = [ln.strip() for ln in (text or seen or "").splitlines() if ln.strip()]
+    return lines[0] if lines else "LinkedIn"
 
 
 class LinkedInAdapter(PortalAdapter):
@@ -94,22 +150,34 @@ class LinkedInAdapter(PortalAdapter):
     def login_url(self) -> str:
         return f"{self.base_url}/login"
 
+    def session(self) -> LinkedInSession:
+        """Sign-in state from all tabs + the profile's session cookie (see portals/linkedin_session.py)."""
+        ctx = self.engine.context
+        if getattr(self, "_session", None) is None or self._session.context is not ctx:
+            self._session = LinkedInSession(ctx, self.base_url)
+        return self._session
+
+    async def login_state(self, navigate: bool = False, settle_s: float = 8) -> LoginCheck:
+        """navigate=True opens /feed/ (members only) and judges that page; navigate=False inspects every open
+        LinkedIn tab without touching them (used while you sign in), confirming in a background tab if needed."""
+        if not navigate:
+            return await self.session().check(confirm=True)
+        page = await self.engine.goto(f"{self.base_url}/feed/")
+        check = await self.session().check(confirm=False, pages=[page])
+        deadline = asyncio.get_running_loop().time() + settle_s
+        while check.state == LinkedInState.UNKNOWN and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.5)  # client-side redirects / React rendering
+            check = await self.session().check(confirm=False, pages=[page])
+        return check
+
     async def is_logged_in(self, navigate: bool = True) -> bool:
-        page = self.engine.page
-        if navigate:
-            await self.engine.goto(f"{self.base_url}/feed/")
-        url = page.url.lower()
-        if any(x in url for x in ("/login", "/authwall", "/checkpoint", "uas/login", "/signup")):
-            return False
-        key, _ = await self.engine.wait_for_any({"in": LOGGED_IN, "out": LOGGED_OUT},
-                                                timeout_ms=8000 if navigate else 500)
-        return key == "in"
+        return (await self.login_state(navigate)).authenticated
 
     def _check_session(self) -> None:
-        url = self.engine.page.url.lower()
-        if "/checkpoint" in url:
+        verdict = classify_page(self.engine.page.url, None, session_cookie=True, remembered=False)
+        if verdict.state == LinkedInState.VERIFICATION:
             raise LoginRequired(self.name, "LinkedIn security checkpoint (CAPTCHA/verification) - please complete it")
-        if any(x in url for x in ("/login", "/authwall", "uas/login")):
+        if verdict.state in (LinkedInState.LOGIN_PAGE, LinkedInState.EXPIRED):
             raise LoginRequired(self.name, "LinkedIn session expired")
 
     # ------------------------------------------------------------ search
@@ -172,7 +240,9 @@ class LinkedInAdapter(PortalAdapter):
         await self.engine.goto(job.url)
         self._check_session()
         page = self.engine.page
-        await self.engine.wait_for_any({"jd": T(css=DETAIL_JD), "title": T(css=DETAIL_TITLE[:3])}, timeout_ms=15_000)
+        key, _ = await self.engine.wait_for_any({"jd": T(css=DETAIL_JD), "title": T(css=DETAIL_TITLE[:3]),
+                                                 "page": T(css=[DETAIL_PAGE]),
+                                                 "about": T(within_text=["About the job"])}, timeout_ms=15_000)
         more = await self.engine.find(T(css=["button.jobs-description__footer-button",
                                              "button[aria-label*='see more description' i]"]), timeout_ms=500)
         if more is not None:
@@ -180,12 +250,17 @@ class LinkedInAdapter(PortalAdapter):
                 await more.click()
             except PlaywrightError:
                 pass
-        job.title = (await first_text(page, DETAIL_TITLE)).split("\n")[0] or job.title
-        job.company = (await first_text(page, DETAIL_COMPANY)).split("\n")[0] or job.company
-        loc = await first_text(page, DETAIL_LOCATION)
-        if loc:
-            job.location = loc.split("·")[0].strip()
-        job.description = await first_text(page, DETAIL_JD) or job.description
+        if key in {"page", "about"} and not await self.engine.exists(T(css=DETAIL_JD)):
+            await self._read_new_layout(job)
+        else:
+            job.title = (await first_text(page, DETAIL_TITLE)).split("\n")[0] or job.title
+            job.company = (await first_text(page, DETAIL_COMPANY)).split("\n")[0] or job.company
+            loc = await first_text(page, DETAIL_LOCATION)
+            if loc:
+                job.location = loc.split("·")[0].strip()
+            job.description = await first_text(page, DETAIL_JD) or job.description
+        if not job.description:  # any other layout: the 'About the job' section by its heading
+            await self._read_new_layout(job)
         key, btn = await self.engine.wait_for_any({"applied": APPLIED_STATE, "apply": APPLY_BTN, "closed": NO_LONGER},
                                                   timeout_ms=5000)
         if key == "applied":
@@ -199,6 +274,22 @@ class LinkedInAdapter(PortalAdapter):
         job.details_loaded = True
         return job
 
+    async def _read_new_layout(self, job: JobPosting) -> None:
+        """2026 job page: the description is the 'About the job' section; title/company come from the page title."""
+        page = self.engine.page
+        data: dict = {}
+        for _ in range(10):  # the description section renders a moment after the top card
+            try:
+                data = await page.evaluate(DETAIL_JS, DETAIL_PAGE)
+            except PlaywrightError as exc:
+                log.debug("job page read failed: %s", exc)
+            if data.get("jd"):
+                break
+            await page.wait_for_timeout(500)
+        job.title = data.get("title") or job.title
+        job.company = data.get("company") or job.company
+        job.description = data.get("jd") or job.description
+
     # ------------------------------------------------------------- apply
     async def apply(self, job: JobPosting, ctx: ApplyContext) -> ApplyResult:
         page = self.engine.page
@@ -210,7 +301,7 @@ class LinkedInAdapter(PortalAdapter):
         if key == "applied":
             return ApplyResult(ApplyOutcome.ALREADY_APPLIED, "LinkedIn shows this job as applied")
         if key == "closed":
-            return ApplyResult(ApplyOutcome.FAILED, "No longer accepting applications")
+            return ApplyResult(ApplyOutcome.EXPIRED, "LinkedIn: no longer accepting applications")
         if btn is None:
             return ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED, "Apply button not found",
                                screenshot=await self.engine.screenshot(f"linkedin-noapply-{job.external_id}"))
@@ -231,6 +322,8 @@ class LinkedInAdapter(PortalAdapter):
             cont = await self.engine.find(CONTINUE_EXTERNAL, timeout_ms=2000)
             if cont is not None:
                 new_page = await self.engine.expect_popup(lambda: self.engine.click(cont), timeout_ms=8000)
+        if new_page is None and _off_linkedin(page.url, self.base_url):
+            new_page = page  # the company site opened in this tab
         if new_page is None:
             return ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED, "Company website did not open")
         return ApplyResult(ApplyOutcome.EXTERNAL, "External application", external_url=new_page.url,
@@ -249,37 +342,69 @@ class LinkedInAdapter(PortalAdapter):
             modal = await self._modal()
             if modal is None:
                 return ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED, "Easy Apply dialog closed unexpectedly")
+            await self._wait_for_step(modal)
             await self._select_resume(modal, ctx, filler)
             report = await filler.fill(modal)
             unresolved = summarize_unresolved(report)
             all_unresolved.extend(u for u in unresolved if u not in all_unresolved)
+            if unresolved and ctx.mode.value != "dry_run":
+                out = await ask_and_fill(ctx, page, modal, filler, report.unresolved)
+                if out.skipped_by_you:
+                    await self._discard(page)
+                    return ApplyResult(ApplyOutcome.REJECTED, "You chose to skip this application")
+                if not out.answered:
+                    await self._discard(page)
+                    return ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED,
+                                       "Questions need your answers: " + "; ".join(unresolved[:5]),
+                                       unresolved=all_unresolved)
+                answered = [u for u in unresolved if not any(u.startswith(m + ":") for m in out.still_missing)]
+                all_unresolved = [u for u in all_unresolved if u not in answered]
+                unresolved = [u for u in unresolved if u not in answered]
             submit = await self.engine.find(SUBMIT_BTN, root=modal)
             if submit is not None:
                 return await self._submit(page, modal, submit, ctx, all_unresolved)
             nxt = await self.engine.find(REVIEW_BTN, root=modal) or await self.engine.find(NEXT_BTN, root=modal)
             if nxt is None:
-                await self._discard(page)
-                return ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED, "Unknown Easy Apply step",
-                                   unresolved=all_unresolved)
+                return await self._navigator_fallback(page, ctx, all_unresolved)
             if unresolved:
                 res = await self._need_human(page, ctx, unresolved, all_unresolved)
                 if res is not None:
                     return res
             header = await self._step_marker(modal)
-            await self.engine.click(nxt)
-            await page.wait_for_timeout(400)
-            for _ in range(20):
-                if await self._step_marker(modal) != header or await self._success(page):
-                    break
-                await page.wait_for_timeout(250)
-            else:
-                errors = await collect_errors(modal)
-                if errors:
-                    res = await self._need_human(page, ctx, errors, all_unresolved)
+            if not await self._advance(page, modal, nxt, header):
+                # the step did not move: read what the dialog marks invalid, repair it once, try once more
+                problems = await filler.fix_invalid(modal)
+                if problems.fixed:
+                    await ctx.event("form_repair", "Re-entered: " + "; ".join(problems.fixed[:4]))
+                if not problems.fixed or not await self._advance(page, modal, nxt, header):
+                    errors = list(dict.fromkeys([*problems.messages, *await collect_errors(modal)]))
+                    res = await self._need_human(page, ctx, errors or ["LinkedIn did not accept this step (no message "
+                                                                       "the assistant could read)"], all_unresolved)
                     if res is not None:
                         return res
         await self._discard(page)
         return ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED, "Too many Easy Apply steps", unresolved=all_unresolved)
+
+    async def _wait_for_step(self, modal: Locator, timeout_ms: int = 8000) -> None:
+        """The dialog opens before its step is rendered: wait for its own Next / Review / Submit button."""
+        target = T("easy apply step", css=[*SUBMIT_BTN.css, *REVIEW_BTN.css, *NEXT_BTN.css],
+                   role=[*SUBMIT_BTN.role, *REVIEW_BTN.role, *NEXT_BTN.role])
+        await self.engine.find(target, root=modal, timeout_ms=timeout_ms)
+
+    async def _navigator_fallback(self, page: Page, ctx: ApplyContext, all_unresolved: list[str]) -> ApplyResult:
+        """An Easy Apply step these selectors do not know: let the generic navigator read and continue it."""
+        from app.config import get_settings
+        from app.navigator.agent import navigate_application
+
+        if not get_settings().navigator_enabled:
+            await self._discard(page)
+            return ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED, "Unknown Easy Apply step", unresolved=all_unresolved)
+        await ctx.event("handoff", "Unfamiliar Easy Apply step: the navigator continues in the dialog", level="warning")
+        res = await navigate_application(self.engine, page, ctx, ats_name="linkedin-easy-apply")
+        if res.outcome != ApplyOutcome.APPLIED and not res.submit_attempted:
+            await self._discard(page)  # never leave a half-filled Easy Apply draft behind
+        res.unresolved = list(dict.fromkeys([*all_unresolved, *res.unresolved]))
+        return res
 
     async def _need_human(self, page: Page, ctx: ApplyContext, problems: list[str],
                           all_unresolved: list[str]) -> ApplyResult | None:
@@ -305,7 +430,7 @@ class LinkedInAdapter(PortalAdapter):
             pass
         decision = await ctx.decide_submit(page, unresolved=unresolved,
                                            summary=f"LinkedIn Easy Apply for '{ctx.job.title}' at {ctx.job.company} is ready",
-                                           detect_submitted=lambda: self._success(page))
+                                           detect_submitted=lambda: self._success(page, after_submit=True))
         if decision == SubmitDecision.DRY_RUN:
             await self._discard(page)
             return ApplyResult(ApplyOutcome.DRY_RUN, "Dry run: Easy Apply filled, discarded before submit",
@@ -319,42 +444,97 @@ class LinkedInAdapter(PortalAdapter):
                                "Not submitted: " + ("; ".join(unresolved[:5]) or "needs your review"),
                                unresolved=unresolved)
         if decision == SubmitDecision.SUBMITTED_BY_USER:
-            return await self._applied(page) if await self._success(page) else ApplyResult(
+            return await self._applied(page) if await self._success(page, after_submit=True) else ApplyResult(
                 ApplyOutcome.MANUAL_ACTION_REQUIRED, "Submitted by you, confirmation not detected", submit_attempted=True)
-        await ctx.mark_submit_attempt()
-        await self.engine.click(submit)
-        for _ in range(40):
-            if await self._success(page):
-                return await self._applied(page)
-            errors = await collect_errors(modal) if await modal.count() else []
-            if errors:
-                return ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED, "LinkedIn rejected the submission: "
-                                   + "; ".join(errors[:3]), submit_attempted=True)
-            await page.wait_for_timeout(500)
-        return ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED, "Submitted but no confirmation detected",
-                           submit_attempted=True, screenshot=await self.engine.screenshot("linkedin-unconfirmed"))
+        watcher = SubmissionWatcher(page, portal_probe=lambda: self._confirmation(page, after_submit=True),
+                                    error_probe=lambda: self._dialog_errors(modal))
+        await watcher.begin()
+        try:
+            await ctx.mark_submit_attempt()
+            await self.engine.click(submit)
+            verdict = await watcher.wait(lambda: page, wait_s=20)
+            if verdict.state == SubmissionState.NO_EFFECT:  # the click did nothing at all: once more, never again
+                await ctx.event("submit_retry", "LinkedIn did not react to 'Submit application' - clicking it once more")
+                await self.engine.click(submit)
+                verdict = await watcher.wait(lambda: page, wait_s=20)
+        finally:
+            watcher.stop()  # the LinkedIn tab lives for the whole run: no listener may outlive this submit
+        await ctx.event("submission", f"Submission result: {verdict.state.value}"
+                        + (f" - {verdict.message}" if verdict.message else ""), evidence=verdict.evidence)
+        if verdict.state == SubmissionState.CONFIRMED:
+            res = await self._applied(page, seen=verdict.confirmation_text)
+            res.evidence = verdict.evidence
+            return res
+        if verdict.state == SubmissionState.REFUSED:
+            return ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED, "LinkedIn rejected the submission: " + verdict.message,
+                               submit_attempted=False)
+        shot = await self.engine.screenshot("linkedin-unconfirmed")
+        if verdict.state == SubmissionState.FAILED:
+            return ApplyResult(ApplyOutcome.FAILED, f"Submission failed: {verdict.message}", submit_attempted=True,
+                               screenshot=shot, verification="failed", evidence=verdict.evidence)
+        return ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED,
+                           f"Submitted - confirmation not verified: {verdict.message or 'LinkedIn showed no confirmation'}",
+                           submit_attempted=True, screenshot=shot, verification="uncertain", evidence=verdict.evidence)
 
-    async def _applied(self, page: Page) -> ApplyResult:
-        text = await self.engine.text_of(POST_APPLY) or await page_has_success(page) or "Application sent"
+    async def _advance(self, page: Page, modal: Locator, nxt: Locator, header: str) -> bool:
+        """Click Next / Review and report whether the dialog moved to another step."""
+        try:
+            await self.engine.click(nxt)
+        except Exception as exc:  # noqa: BLE001 - a re-rendered button: the step may still have moved
+            log.debug("next click: %s", exc)
+        await page.wait_for_timeout(400)
+        for _ in range(20):
+            if await self._step_marker(modal) != header or await self._success(page):
+                return True
+            await page.wait_for_timeout(250)
+        return False
+
+    async def _dialog_errors(self, modal: Locator) -> list[str]:
+        try:
+            return await collect_errors(modal) if await modal.count() and await modal.is_visible() else []
+        except PlaywrightError:
+            return []
+
+    async def _applied(self, page: Page, *, seen: str = "") -> ApplyResult:
+        """``seen``: the confirmation LinkedIn showed when the submit was verified. A moment later its post-apply
+        panel ("Next best action ...") may have replaced it; the record quotes what said the application was sent."""
+        text = await self._confirmation(page, after_submit=True)
         dismiss = await self.engine.find(DISMISS, timeout_ms=500)
         if dismiss is not None:
             try:
                 await dismiss.click()
             except PlaywrightError:
                 pass
+        line = confirmation_line(text, seen)
         return ApplyResult(ApplyOutcome.APPLIED, "Applied with LinkedIn Easy Apply",
-                           confirmation_text=text.split("\n")[0][:300], submit_attempted=True)
+                           confirmation_text=line[:300], submit_attempted=True, verification="confirmed",
+                           evidence=[f"portal_confirmation: {line[:160]}"])
 
-    async def _success(self, page: Page) -> bool:
-        if await self.engine.exists(POST_APPLY, root=page):
-            return True
-        return bool(await self.engine.exists(T(css=["[role='dialog']:has-text('Your application was sent')",
-                                                     "[role='dialog']:has-text('Application sent')"]), root=page))
+    async def _confirmation(self, page: Page, *, after_submit: bool = False) -> str:
+        """LinkedIn's own confirmation text ('' if none): the post-apply dialog / status message, or - only once we
+        clicked Submit - the job page's 'Applied ... ago' / 'Application submitted' state."""
+        try:
+            text = await page.evaluate(CONFIRMATION_JS)
+        except PlaywrightError:
+            text = ""
+        if not text and await self.engine.exists(POST_APPLY, root=page):
+            text = await self.engine.text_of(POST_APPLY, root=page) or "Application sent"
+        if not text and after_submit and await self.engine.exists(APPLIED_TEXT, root=page):
+            text = await self.engine.text_of(APPLIED_TEXT, root=page)
+        return (text or "").strip()
+
+    async def _success(self, page: Page, *, after_submit: bool = False) -> bool:
+        return bool(await self._confirmation(page, after_submit=after_submit))
 
     async def _step_marker(self, modal: Locator) -> str:
+        """Changes when the dialog moves to another step (old: <progress>; 2026: a '2/6 pages'-style counter)."""
         try:
-            return await modal.evaluate("el => { const h = el.querySelector('h3, h2, .t-16'); const p = el.querySelector('progress, [role=progressbar]');"
-                                        " return (h ? h.innerText : '') + '|' + (p ? (p.value || p.getAttribute('aria-valuenow')) : '') + '|' + el.querySelectorAll('input,select,textarea').length; }")
+            return await modal.evaluate(
+                "el => { const h = el.querySelector('h3, h2, .t-16'); const p = el.querySelector('progress, [role=progressbar]');"
+                " const pages = ((el.innerText || '').match(/\\b\\d+\\s*\\/\\s*\\d+\\s+pages?\\b|\\b\\d+\\s*%/i) || [''])[0];"
+                " const labels = Array.from(el.querySelectorAll('label, legend')).map(l => l.innerText.trim()).join('|').slice(0, 300);"
+                " return (h ? h.innerText : '') + '|' + (p ? (p.value || p.getAttribute('aria-valuenow')) : '') + '|' + pages"
+                " + '|' + el.querySelectorAll('input,select,textarea').length + '|' + labels; }")
         except PlaywrightError:
             return ""
 
@@ -399,6 +579,10 @@ class LinkedInAdapter(PortalAdapter):
                 await discard.click()
         except PlaywrightError as exc:
             log.debug("discard failed: %s", exc)
+
+
+def _off_linkedin(url: str, base_url: str) -> bool:
+    return bool(url) and url.startswith("http") and not url.startswith(base_url) and "linkedin.com" not in url
 
 
 def _id_from_url(url: str) -> str:

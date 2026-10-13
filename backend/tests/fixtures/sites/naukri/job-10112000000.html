@@ -1,0 +1,54 @@
+<!doctype html><html><head><meta charset="utf-8"><title>React Developer - Bounteous (mock)</title>
+<style>._chip_k2{display:inline-block;margin:4px;padding:4px 10px;border:1px solid #888;border-radius:12px;cursor:pointer}
+._chip_k2.sel{background:#cde}._save_q9{display:inline-block;padding:4px 12px;background:#06c;color:#fff;cursor:pointer}</style></head><body>
+<header><div class="nI-gNb-drawer__icon">Profile</div></header>
+<section class="styles_job-header-container___0wLZ">
+  <h1 class="styles_jd-header-title__rZwM1" title="React Developer">React Developer</h1>
+  <div class="styles_jd-header-comp-name__MvqAI"><a href="#">Bounteous</a></div>
+  <div class="styles_jhc__exp__k_giM"><span>5 - 9 years</span></div>
+  <span class="styles_jhc__location__W_pVs"><a>Bengaluru</a></span>
+  <div class="styles_jhc__apply-button-container__5Bqnb" id="apply-zone"></div>
+</section>
+<section class="styles_job-desc-container__txpYf"><div class="styles_JDC__dang-inner-html__h0K4t">
+<p>React, Next.js, TypeScript, performance and accessibility. 5+ years of experience.</p></div></section>
+<!-- a redesigned screening chat: unfamiliar class names for the answer controls -->
+<div class="chatbot_DrawerContentWrapper" style="display:none">
+  <ul class="chatbot_MessageContainer" id="msgs"></ul>
+  <div class="_area_z1" id="area"></div>
+</div>
+<script>
+const KEY = 'applied-10112000000';
+const zone = document.getElementById('apply-zone');
+zone.innerHTML = localStorage.getItem(KEY)
+  ? '<button id="already-applied" disabled>Applied</button>'
+  : '<button id="apply-button" class="styles_apply-button__uJI3A">Apply</button>';
+const QS = [
+  {text: 'Please select the city you are currently residing or willing to relocate to', chips: ['Bangalore', 'Noida', 'Pune']},
+  {text: 'What is your last working day?'},
+  {text: 'How many years of experience do you have in Hooks?'},
+];
+let i = 0; window.ANSWERS = [];
+const drawer = document.querySelector('.chatbot_DrawerContentWrapper'), msgs = document.getElementById('msgs'), area = document.getElementById('area');
+function bot(t) { const li = document.createElement('li'); li.className = 'botItem'; li.innerHTML = '<div><span></span></div>'; li.querySelector('span').textContent = t; msgs.appendChild(li); }
+function render() {
+  const q = QS[i]; bot(q.text); area.innerHTML = '';
+  if (q.chips) {
+    q.chips.forEach(c => { const d = document.createElement('div'); d.className = '_chip_k2'; d.textContent = c;
+      d.onclick = () => { area.querySelectorAll('._chip_k2').forEach(x => x.classList.remove('sel')); d.classList.add('sel'); }; area.appendChild(d); });
+  } else { const inp = document.createElement('input'); inp.className = '_q_inp'; inp.placeholder = 'Type your answer'; area.appendChild(inp); }
+  const s = document.createElement('div'); s.className = '_save_q9'; s.textContent = 'Save'; s.onclick = save; area.appendChild(s);
+}
+function save() {
+  const q = QS[i]; const sel = area.querySelector('._chip_k2.sel'); const inp = area.querySelector('._q_inp');
+  const val = q.chips ? (sel ? sel.textContent : '') : (inp ? inp.value.trim() : '');
+  if (!val) return;
+  window.ANSWERS.push(val); i++; area.innerHTML = '';
+  if (i >= QS.length) { setTimeout(() => { bot('Thank you for your responses.'); localStorage.setItem(KEY, '1'); }, 300); }
+  else setTimeout(render, 300);
+}
+const btn = document.getElementById('apply-button');
+if (btn) btn.onclick = () => { drawer.style.display = 'block';
+  bot("Hi Asha Verma, thank you for showing interest. Kindly answer all the recruiter's questions to successfully apply for the job.");
+  setTimeout(render, 900); };
+</script>
+</body></html>

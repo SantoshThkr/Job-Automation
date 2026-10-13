@@ -1,0 +1,23 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Frontend Engineer at KitCo | Instahyre (mock)</title></head><body>
+<nav><a href="/instahyre/candidate/profile/" class="candidate-name">Asha</a></nav>
+<h1 class="job-title">Frontend Engineer</h1><h2 class="company-name">KitCo</h2>
+<div class="job-locations">Bangalore</div><div class="job-experience">5 - 9 years</div>
+<div class="job-skills"><span class="skill">React</span><span class="skill">TypeScript</span></div>
+<div class="job-description"><p>Build our payments dashboard in React, TypeScript and Next.js.</p><ul><li>5+ years of frontend experience</li></ul></div>
+<button class="apply-btn" id="interested-btn" onclick="document.getElementById('m').classList.add('in'); document.getElementById('m').style.display='block'">Apply</button>
+<div class="modal apply-modal" id="m" role="dialog" style="display:none"><h4>Apply to KitCo</h4>
+ <div id="kit"></div>
+ <div class="error-message" id="err" style="display:none"></div>
+ <button id="apply-confirm">Apply</button></div>
+<div class="toast-success" id="ok" hidden>You have successfully applied to Frontend Engineer</div>
+<script src="/kit/kit.js"></script>
+<script>
+  const kit = document.getElementById('kit');
+  kitRender(kit, ['title', 'months', 'fresher', 'workauth', 'blood', 'graphql', 'why', 'github'], {company: 'KitCo'});
+  document.getElementById('apply-confirm').onclick = () => {
+    const errs = kitValid(kit), err = document.getElementById('err');
+    if (errs.length) { err.textContent = errs.join(' '); err.style.display = 'block'; return; }
+    window.SUBMITTED = kitData(kit);
+    document.getElementById('m').style.display = 'none'; document.getElementById('ok').hidden = false;
+  };
+</script></body></html>

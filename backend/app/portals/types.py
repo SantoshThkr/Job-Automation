@@ -44,6 +44,7 @@ class ApplyOutcome(StrEnum):
     ALREADY_APPLIED = "ALREADY_APPLIED"
     EXTERNAL = "EXTERNAL"  # hand over to the ATS layer
     REJECTED = "REJECTED"  # user rejected in review mode
+    EXPIRED = "EXPIRED"  # the job is closed / no longer accepting applications
 
 
 @dataclass
@@ -57,3 +58,15 @@ class ApplyResult:
     submit_attempted: bool = False
     screenshot: str | None = None
     unresolved: list[str] = field(default_factory=list)
+    resume_url: str | None = None  # page to continue from on a retry (parked external applications)
+    steps: int = 0
+    handoff: bool = False  # a specialised adapter gave up structurally: the generic navigator may continue
+    verification: str = ""  # confirmed | uncertain | failed (engine/submission.py) - "" when nothing was submitted
+    evidence: list[str] = field(default_factory=list)  # the signals the verdict rests on
+    # the portal itself refuses further applications for now (daily quota, rate limit): what it said. The job is not
+    # at fault and nothing about it needs you - it stays queued and the portal is left alone for the rest of the run
+    portal_limit: str = ""
+    # verified afterwards that nothing reached the portal (e.g. the reloaded job still offers "Apply"): the earlier
+    # "submit attempted" mark is withdrawn, so Retry needs no confirmation and nothing has to be checked by you
+    nothing_sent: bool = False
+    click_ignored: bool = False  # the portal did not react to its own Apply click at all (see orchestrator)

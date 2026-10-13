@@ -6,7 +6,7 @@ import { GateBanner } from "@/components/GateBanner";
 import { JobTable } from "@/components/JobTable";
 import { Portal, api } from "@/lib/api";
 import { usePoll } from "@/lib/hooks";
-import { MODE_LABEL, timeAgo } from "@/lib/format";
+import { MODE_LABEL, fmtDate, timeAgo } from "@/lib/format";
 
 const STAT_CARDS: { key: string; label: string; href: string }[] = [
   { key: "jobs_discovered", label: "Jobs discovered", href: "/jobs" },
@@ -14,10 +14,22 @@ const STAT_CARDS: { key: string; label: string; href: string }[] = [
   { key: "applications", label: "Applications", href: "/jobs?status=APPLIED" },
   { key: "skipped", label: "Skipped", href: "/jobs?status=SKIPPED,DUPLICATE" },
   { key: "failed", label: "Failed", href: "/jobs?status=FAILED" },
-  { key: "manual_action_required", label: "Manual action required", href: "/review" },
-  { key: "today_applications", label: "Today's applications", href: "/jobs?status=APPLIED" },
-  { key: "weekly_applications", label: "Weekly applications", href: "/jobs?status=APPLIED" },
+  { key: "manual_action_required", label: "Needs your attention", href: "/review" },
+  { key: "queued", label: "Queued to apply", href: "/jobs?status=QUEUED&sort=score" },
+  { key: "today_applications", label: "Applied today", href: "/jobs?status=APPLIED" },
+  { key: "weekly_applications", label: "Applied this week", href: "/jobs?status=APPLIED" },
 ];
+
+const RUN_PARTS: [string, string][] = [
+  ["result_applied", "applied"], ["result_dry_run", "dry-run"], ["result_manual_action_required", "need you"],
+  ["result_failed", "failed"], ["relevant", "relevant"], ["skipped", "skipped"], ["new_jobs", "new"],
+  ["waiting_for_profile", "waiting for profile"],
+];
+
+function runSummary(stats: Record<string, number>): string {
+  const parts = RUN_PARTS.filter(([k]) => stats[k]).map(([k, label]) => `${stats[k]} ${label}`);
+  return parts.join(", ") || "nothing new";
+}
 
 export default function DashboardPage() {
   const stats = usePoll(api.stats, 4000);
@@ -25,6 +37,7 @@ export default function DashboardPage() {
   const events = usePoll(() => api.events(30), 4000);
   const profile = usePoll(api.profile, 15000);
   const recent = usePoll(() => api.jobs({ applications_only: true, sort: "updated", page_size: 8 }), 5000);
+  const runs = usePoll(() => api.runs(8), 10000);
 
   const refreshAll = () => {
     agent.refresh();
@@ -77,6 +90,26 @@ export default function DashboardPage() {
               <Link href="/jobs?applications_only=true" className="small">All →</Link>
             </div>
             <JobTable jobs={recent.data?.items ?? []} compact />
+          </div>
+          <div className="card">
+            <h2>Run history</h2>
+            {!runs.data?.length && <div className="empty">No runs yet.</div>}
+            {!!runs.data?.length && (
+              <table className="runs">
+                <thead><tr><th>Run</th><th>Started</th><th>Mode</th><th>Status</th><th>Result</th></tr></thead>
+                <tbody>
+                  {runs.data.map((r) => (
+                    <tr key={r.id}>
+                      <td>#{r.id}</td>
+                      <td>{fmtDate(r.started_at)}</td>
+                      <td>{MODE_LABEL[r.mode] ?? r.mode}</td>
+                      <td><span className={`badge ${({ COMPLETED: "ok", ERROR: "err", RUNNING: "info", STOPPED: "warn" } as Record<string, string>)[r.status] ?? ""}`}>{r.status.toLowerCase()}</span></td>
+                      <td className="small">{runSummary(r.stats)}{r.stats.discovered ? ` · ${r.stats.discovered} scanned` : ""}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </div>
         </div>
         <div className="card" style={{ maxHeight: 760, overflowY: "auto" }}>

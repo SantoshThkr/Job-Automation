@@ -60,7 +60,34 @@ class _QuietHandler(SimpleHTTPRequestHandler):
     def do_POST(self):  # forms in mock sites post here; reply with a confirmation page
         length = int(self.headers.get("Content-Length") or 0)
         self.rfile.read(length)
-        target = self.path.split("?")[0]
+        target, _, query = self.path.partition("?")
+        if target.startswith("/submit-lab/api/"):  # an ATS-style JSON answer to the submit request
+            if query.endswith("=slow"):  # a busy server (knowforth.in, run #21: 'Submitting...' for 25+ s)
+                import time
+
+                time.sleep(29)
+                query = "r=ok"
+            status, payload = {"ok": (200, b'{"success": true, "applicationId": "APP-2026-0042"}'),
+                               "plain": (200, b'{"received": 1}'),
+                               "fail": (500, b'{"success": false, "error": "Internal error"}'),
+                               # a Next.js server action's reply (React Server Components stream; yobitel.com)
+                               "rsc": (200, b'0:{"a":"$@1","f":"","b":"build-1"}\n1:{"ok":true,"data":{"reference":"YA-01592"}}\n'),
+                               "rscspam": (200, b'0:{"a":"$@1","f":"","b":"build-1"}\n1:{"ok":true,"data":{"reference":"spam"}}\n'),
+                               "nklimit": (429, b'{"error": {"message": "You have exhausted your daily apply limit. '
+                                                b'Please try again tomorrow."}}'),
+                               # WordPress Contact Form 7 (wp-json/contact-form-7/v1/contact-forms/<id>/feedback)
+                               "cf7": (200, b'{"contact_form_id":890,"status":"mail_sent","message":"Thank you for your '
+                                            b'message. It has been sent.","posted_data_hash":"0a1b","into":"#wpcf7-f890-o1",'
+                                            b'"invalid_fields":[]}'),
+                               "cf7spam": (200, b'{"contact_form_id":890,"status":"spam","message":"There was an error '
+                                                b'trying to send your message. Please try again later.","invalid_fields":[]}'),
+                               }.get(query.split("=")[-1], (200, b"{}"))
+            self.send_response(status)
+            self.send_header("Content-Type", "text/x-component" if "rsc" in query else "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         thanks = SITES / target.lstrip("/")
         if thanks.is_file():
             body = thanks.read_bytes()

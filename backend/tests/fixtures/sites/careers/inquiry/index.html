@@ -1,0 +1,21 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Careers - React JS Developer | GloryLab</title></head><body>
+<!-- glorywebs.com (run #23): the job page carries the site's sales form ("INQUIRE NOW"); it was filled with the
+     candidate's name, e-mail and phone and sent. A sales enquiry is not a job application. -->
+<h1>React JS Developer</h1>
+<section><h2>Job description</h2><p>3+ years of experience with React, Redux and TypeScript. Send your profile to our HR team.</p></section>
+<aside><h3>Have a project in mind?</h3>
+<form id="lead">
+ <label for="n">Full Name</label><input id="n" name="fullname" required>
+ <label for="e">Email</label><input id="e" name="email" type="email" required>
+ <label for="p">Phone</label><input id="p" name="phone" type="tel" required>
+ <label for="m">Message</label><textarea id="m" name="message"></textarea>
+ <button type="submit">INQUIRE NOW</button>
+</form><div id="out"></div></aside>
+<script>
+  window.SUBMITS = 0;
+  document.querySelector('form').addEventListener('submit', async (e) => {
+    e.preventDefault(); window.SUBMITS++;
+    await fetch('/submit-lab/api/apply?r=cf7', { method: 'POST', body: '{}' }).then(r => r.text());
+    document.getElementById('out').innerHTML = '<div class="wpcf7-response-output">Thank you for your message. It has been sent.</div>';
+  });
+</script></body></html>

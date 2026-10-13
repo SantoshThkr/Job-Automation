@@ -1,0 +1,17 @@
+<!doctype html><html><head><meta charset="utf-8"><title>form</title></head><body>
+<div id="wrap"><form id="f">
+<label for="n">Name *</label><input id="n" name="name" required>
+<label for="e">Email *</label><input id="e" type="email" name="email" required>
+<label for="p">Phone *</label><input id="p" type="tel" name="phone" required>
+<label for="r">CV *</label><input id="r" type="file" name="cv" required>
+<fieldset><legend>Gender</legend><label><input type="radio" name="gender" value="m"> Male</label>
+<label><input type="radio" name="gender" value="f"> Female</label><label><input type="radio" name="gender" value="x"> Prefer not to say</label></fieldset>
+<label for="np">Notice period *</label><select id="np" name="np" required><option value="">--</option><option>Immediate</option><option>Up to 30 days</option><option>More than 30 days</option></select>
+<button type="submit">Submit</button></form></div>
+<script>
+document.getElementById('f').addEventListener('submit', (e) => { e.preventDefault();
+  const g = document.querySelector('input[name=gender]:checked');
+  window.parent.__frameSubmitted = {name: n.value, email: e.value, np: np.value, gender: g ? g.value : '', cv: r.files.length ? r.files[0].name : ''};
+  document.getElementById('wrap').innerHTML = '<h2>Thank you for applying!</h2><p>We have received your application.</p>';
+});
+</script></body></html>

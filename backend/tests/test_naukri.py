@@ -120,7 +120,11 @@ async def test_unknown_question_requires_manual_action(naukri, engine, profile):
     job = await _job(naukri, "10062000000")
     res = await naukri.apply(job, make_ctx(engine, profile, job, AgentMode.AUTO))
     assert res.outcome == ApplyOutcome.MANUAL_ACTION_REQUIRED
-    assert "blood group" in res.message and res.submit_attempted
+    assert "blood group" in res.message
+    # Naukri registers an application when its screening chat is completed. After the chat stopped, the reloaded job
+    # still offers "Apply" (checked on three real jobs on 2026-10-12): nothing was sent, so it may be applied to again
+    assert res.nothing_sent and not res.submit_attempted
+    assert any("still offers 'Apply'" in e for e in res.evidence)
 
 
 async def test_review_mode_approve_and_reject(naukri, engine, profile):
@@ -145,7 +149,28 @@ async def test_review_mode_user_answers_unknown_question_in_browser(naukri, engi
     gate = FakeGate([GateResult.APPROVE, user_answers])
     res = await naukri.apply(job, make_ctx(engine, profile, job, AgentMode.REVIEW, gate))
     assert res.outcome == ApplyOutcome.APPLIED, res.message
-    assert [k for k, _ in gate.calls] == ["review", "manual"]
+    assert [k for k, _ in gate.calls] == ["review", "questions"]
+
+
+async def test_chatbot_question_answered_in_dashboard_is_typed_and_remembered(naukri, engine, profile):
+    from tests.helpers import answers_by_question
+
+    job = await _job(naukri, "10062000000")
+    gate = FakeGate([answers_by_question({"blood group": "O+"})])
+    ctx = make_ctx(engine, profile, job, AgentMode.AUTO, gate, auto_wait=30)
+    res = await naukri.apply(job, ctx)
+    assert res.outcome == ApplyOutcome.APPLIED, res.message
+    assert gate.payloads[0]["questions"][0]["question"].lower().startswith("what is your blood group")
+    assert ("What is your blood group?", "O+") in ctx.remembered
+
+
+async def test_chatbot_continue_without_answer_does_not_loop(naukri, engine, profile):
+    job = await _job(naukri, "10062000000")
+    gate = FakeGate([GateResult.RESOLVED, GateResult.RESOLVED, GateResult.RESOLVED])  # "Continue", nothing typed
+    ctx = make_ctx(engine, profile, job, AgentMode.AUTO, gate, auto_wait=30)
+    res = await naukri.apply(job, ctx)
+    assert res.outcome == ApplyOutcome.MANUAL_ACTION_REQUIRED and "not answered" in res.message
+    assert len(gate.calls) == 1
 
 
 async def test_external_redirect_and_already_applied(naukri, engine, profile):
@@ -164,3 +189,42 @@ async def test_incomplete_profile_blocks_submission(naukri, engine, profile):
     ctx = make_ctx(engine, profile, job, AgentMode.AUTO, submit_blockers=["phone is a placeholder"])
     res = await naukri.apply(job, ctx)
     assert res.outcome == ApplyOutcome.MANUAL_ACTION_REQUIRED and ctx.submits == []
+
+
+async def test_expired_job_redirected_to_search_results(naukri, engine, profile):
+    """Naukri sends expired jobs to search results with a banner; never treat that page as the job."""
+    from app.portals.types import JobPosting
+
+    job = JobPosting(portal="naukri", external_id="10992000000", title="React Developer", company="Quest",
+                     url=f"{naukri.base_url}/job-listings-react-developer-quest-10992000000")
+    job = await naukri.fetch_details(job)
+    assert job.extra.get("expired") is True
+    assert job.title == "React Developer" and job.company == "Quest"  # not overwritten by the results page
+    res = await naukri.apply(job, make_ctx(engine, profile, job, AgentMode.AUTO))
+    assert res.outcome == ApplyOutcome.EXPIRED
+
+
+async def test_real_world_chatbot_flow_without_asking_you(naukri, engine, profile, site_server):
+    """Your 2026-10-07 run: greeting, a city question rendered as unfamiliar chips, last working day,
+    'years in Hooks', then 'Thank you for your responses.' with Naukri's Applied state visible only after reload."""
+    from app.portals.types import JobPosting
+
+    p = profile.model_copy(deep=True)
+    p.professional.last_working_day = "5 March 2026"
+    job = JobPosting(portal="naukri", external_id="10112000000", title="React Developer", company="Bounteous",
+                     url=f"{site_server}/naukri/job-listings-react-developer-bounteous-10112000000",
+                     description="React, Next.js, TypeScript")
+    gate = FakeGate([])
+    ctx = make_ctx(engine, p, job, AgentMode.AUTO, gate, auto_wait=30)
+    res = await naukri.apply(job, ctx)
+    assert res.outcome == ApplyOutcome.APPLIED, res.message
+    assert "Applied" in res.confirmation_text
+    assert gate.calls == []  # nothing was asked
+    await engine.goto(job.url.replace("job-listings-react-developer-bounteous", "job-listings-x"))
+    asked = {q.question: a for q, a in ctx.answers_log}
+    city = asked["Please select the city you are currently residing or willing to relocate to"]
+    assert city.value == "Bangalore" and city.mode == "derived"  # a city, not "Yes"
+    assert asked["What is your last working day?"].value == "5 March 2026"
+    assert asked["How many years of experience do you have in Hooks?"].value == "6"  # React years
+    logs = [m for t, m in ctx.events if t == "question"]
+    assert any("Answer mode: derived" in m and "Verified" in m for m in logs)

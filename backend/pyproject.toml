@@ -8,6 +8,11 @@ requires-python = ">=3.11"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+# every browser test gets its own throwaway Chrome profile: none is kept once its test is over (they had piled up to
+# hundreds of MB on a disk that was full, which is what stops macOS from adding swap). The count stays at pytest's
+# default of 3: with 1, a second pytest session started meanwhile deletes the running session's profile and database.
+tmp_path_retention_policy = "none"
+tmp_path_retention_count = 3
 markers = [
   "browser: tests that drive a real (headless) Chromium against local mock sites",
   "live_ollama: tests that call the local Ollama server (skipped when it is not running)",

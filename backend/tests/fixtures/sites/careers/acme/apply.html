@@ -1,0 +1,64 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Apply - Senior Frontend Engineer | Acme</title>
+<style>section{display:none;padding:16px}section.on{display:block}.error{color:#c00}label{display:block;margin:8px 0}</style></head>
+<body><header><a href="job.html">Back to job</a></header>
+<h1>Senior Frontend Engineer - Application</h1>
+<div id="app">
+<section id="s1" class="on"><h2>Step 1 of 3: Your details</h2>
+  <label for="fn">First name *</label><input id="fn" name="first_name" required>
+  <label for="ln">Last name *</label><input id="ln" name="last_name" required>
+  <label for="em">Email address *</label><input id="em" type="email" name="email" required>
+  <label for="ph">Phone number *</label><input id="ph" type="tel" name="phone" required>
+  <label for="cv">Resume / CV *</label><input id="cv" type="file" name="resume" required accept=".pdf,.doc,.docx">
+  <label for="li">LinkedIn profile</label><input id="li" name="linkedin">
+  <p class="error" hidden></p>
+  <button type="button" onclick="go(1,2)">Continue</button>
+</section>
+<section id="s2"><h2>Step 2 of 3: Screening questions</h2>
+  <label for="yrs">Total years of experience *</label><input id="yrs" type="number" name="years" required>
+  <label for="np">Notice period *</label><select id="np" name="notice" required><option value="">Select</option><option>Immediate</option><option>15 days</option><option>30 days</option><option>60 days</option><option>90 days</option></select>
+  <fieldset><legend>Are you legally authorized to work in India? *</legend>
+    <label><input type="radio" name="auth" value="yes" required> Yes</label><label><input type="radio" name="auth" value="no"> No</label></fieldset>
+  <label for="ectc">Expected CTC (in LPA) *</label><input id="ectc" name="ectc" required>
+  <label for="why">Why are you interested in this role? *</label><textarea id="why" name="why" required maxlength="1000" rows="4"></textarea>
+  <fieldset><legend>Do you hold a valid passport? *</legend>
+    <label><input type="radio" name="passport" value="yes" required> Yes</label><label><input type="radio" name="passport" value="no"> No</label></fieldset>
+  <p class="error" hidden></p>
+  <button type="button" onclick="go(2,1)">Back</button> <button type="button" onclick="go(2,3)">Review application</button>
+</section>
+<section id="s3"><h2>Step 3 of 3: Review your application</h2>
+  <div id="summary"></div>
+  <label><input type="checkbox" id="ok" name="confirm" required> I confirm the information provided is accurate *</label>
+  <p class="error" hidden></p>
+  <button type="button" onclick="go(3,2)">Back</button> <button type="button" onclick="submitApp()">Submit application</button>
+</section>
+</div>
+<script>
+window.__submitted = null;
+function valid(sec){
+  const missing = [];
+  sec.querySelectorAll('[required]').forEach(el => {
+    if (el.type === 'radio') { if (!sec.querySelector('input[name="'+el.name+'"]:checked')) missing.push(el.name); }
+    else if (el.type === 'checkbox') { if (!el.checked) missing.push(el.name); }
+    else if (el.type === 'file') { if (!el.files.length) missing.push(el.name); }
+    else if (!el.value) missing.push(el.name);
+  });
+  const err = sec.querySelector('.error');
+  if (missing.length) { err.hidden = false; err.textContent = 'Please complete required fields: ' + [...new Set(missing)].join(', '); return false; }
+  err.hidden = true; return true;
+}
+function go(from, to){
+  const sec = document.getElementById('s'+from);
+  if (to > from && !valid(sec)) return;
+  sec.classList.remove('on'); document.getElementById('s'+to).classList.add('on');
+  if (to === 3) document.getElementById('summary').textContent = 'Name: ' + fn.value + ' ' + ln.value + ', email: ' + em.value;
+}
+function submitApp(){
+  const sec = document.getElementById('s3'); if (!valid(sec)) return;
+  const data = {}; document.querySelectorAll('input, select, textarea').forEach(el => {
+    if (el.type === 'radio') { if (el.checked) data[el.name] = el.value; }
+    else if (el.type === 'file') data[el.name] = el.files.length ? el.files[0].name : '';
+    else if (el.type === 'checkbox') data[el.name] = el.checked; else data[el.name] = el.value; });
+  window.__submitted = data;
+  document.getElementById('app').innerHTML = '<div class="confirmation"><h2>Thank you for applying!</h2><p>Your application has been submitted. Our team will get back to you.</p></div>';
+}
+</script></body></html>

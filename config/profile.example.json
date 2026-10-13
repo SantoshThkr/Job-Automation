@@ -1,7 +1,6 @@
 {
   "_help": "Candidate facts used for matching and for filling applications. The assistant never invents facts that are not in this file: anything missing (null / empty) is sent to manual review instead. Set profile_confirmed to true once everything below is accurate - real submissions are blocked until then.",
   "profile_confirmed": false,
-
   "personal": {
     "first_name": "YOUR_FIRST_NAME",
     "last_name": "YOUR_LAST_NAME",
@@ -17,7 +16,6 @@
     "github_url": "",
     "portfolio_url": ""
   },
-
   "professional": {
     "current_title": "Senior Frontend Engineer",
     "current_company": "",
@@ -42,6 +40,7 @@
         "technologies": []
       }
     ],
+    "work_history_complete": null,
     "education": [
       {
         "degree": "",
@@ -53,33 +52,62 @@
       }
     ],
     "certifications": [],
-    "languages": ["English"]
+    "languages": [
+      "English"
+    ]
   },
-
   "skills": {
-    "primary": ["JavaScript", "TypeScript", "React", "Next.js", "HTML", "CSS", "Redux"],
-    "secondary": ["Node.js", "Jest", "React Testing Library", "Webpack", "Vite", "Tailwind CSS", "GraphQL", "REST APIs", "Git", "Responsive Design", "Web Performance", "Accessibility"],
+    "primary": [
+      "JavaScript",
+      "TypeScript",
+      "React",
+      "Next.js",
+      "HTML",
+      "CSS",
+      "Redux"
+    ],
+    "secondary": [
+      "Node.js",
+      "Jest",
+      "React Testing Library",
+      "Webpack",
+      "Vite",
+      "Tailwind CSS",
+      "GraphQL",
+      "REST APIs",
+      "Git",
+      "Responsive Design",
+      "Web Performance",
+      "Accessibility"
+    ],
     "years": {
       "JavaScript": null,
       "TypeScript": null,
       "React": null,
       "Next.js": null,
       "Node.js": null
-    }
+    },
+    "complete": null
   },
-
   "work_preferences": {
-    "preferred_locations": ["Bengaluru", "Remote"],
+    "preferred_locations": [
+      "Bengaluru",
+      "Remote"
+    ],
     "open_to_remote": true,
     "open_to_hybrid": true,
     "open_to_onsite": true,
     "willing_to_relocate": false,
     "requires_sponsorship": false,
-    "authorized_countries": ["India"],
+    "authorized_countries": [
+      "India"
+    ],
+    "citizenship": [],
     "willing_to_travel": null,
-    "open_to_shifts": null
+    "open_to_shifts": null,
+    "open_to_contract": null,
+    "interview_availability": ""
   },
-
   "job_preferences": {
     "target_titles": [
       "Frontend Developer",
@@ -130,29 +158,55 @@
       "marketing",
       "director",
       "vp ",
-      "head of"
+      "head of",
+      "backend developer",
+      "backend engineer",
+      "back end developer",
+      "back-end developer",
+      "back-end engineer",
+      "mobile developer",
+      "react native",
+      "golang",
+      "embedded",
+      "automation tester",
+      "manual tester",
+      "site reliability"
     ],
     "excluded_companies": [],
-    "excluded_jd_keywords": ["unpaid", "commission only"],
+    "excluded_jd_keywords": [
+      "unpaid",
+      "commission only"
+    ],
     "min_frontend_ratio": 0.5,
     "accept_fullstack": true,
     "min_salary_lpa": null
   },
-
   "search": {
-    "queries": ["React Developer", "Frontend Developer", "Senior Frontend Engineer"],
-    "locations": ["Bengaluru"],
-    "portals": ["naukri", "linkedin", "instahyre"],
+    "queries": [
+      "React Developer",
+      "Frontend Developer",
+      "Senior Frontend Engineer"
+    ],
+    "locations": [
+      "Bengaluru"
+    ],
+    "portals": [
+      "naukri",
+      "linkedin",
+      "instahyre"
+    ],
     "max_pages_per_query": 3,
     "max_jobs_per_query": 50,
     "max_applications_per_run": 15,
     "max_applications_per_day": 40,
     "posted_within_days": 7,
     "linkedin_easy_apply_only": false,
-    "delay_between_applications_s": [15, 40],
+    "delay_between_applications_s": [
+      15,
+      40
+    ],
     "use_experience_filter": true
   },
-
   "matching": {
     "apply_threshold": 70,
     "skip_threshold": 45,
@@ -161,33 +215,66 @@
     "experience_tolerance_years": 2,
     "location_strict": true
   },
-
   "resumes": [
     {
       "id": "frontend",
       "path": "resumes/resume-frontend.pdf",
-      "label": "Frontend resume",
-      "tags": ["frontend", "react", "ui"],
+      "label": "Frontend resume (React / Next.js)",
+      "tags": [
+        "frontend",
+        "react",
+        "nextjs",
+        "ui"
+      ],
       "default": true
+    },
+    {
+      "id": "ai",
+      "path": "resumes/resume-ai.pdf",
+      "label": "Frontend + AI resume",
+      "tags": [
+        "ai",
+        "llm",
+        "genai",
+        "rag",
+        "agents",
+        "openai"
+      ],
+      "default": false
     },
     {
       "id": "fullstack",
       "path": "resumes/resume-fullstack.pdf",
-      "label": "Full-stack resume",
-      "tags": ["fullstack", "node", "backend"],
+      "label": "Full-stack resume (React + Python/Node)",
+      "tags": [
+        "fullstack",
+        "node",
+        "python",
+        "backend"
+      ],
       "default": false
     }
   ],
-
   "custom_answers": [
-    { "pattern": "how did you hear about", "answer": "Job portal" }
+    {
+      "pattern": "how did you hear about",
+      "answer": "Job portal"
+    }
   ],
-
   "diversity": {
     "gender": "",
     "pronouns": "",
     "veteran_status": "",
     "disability_status": "",
     "ethnicity": ""
-  }
+  },
+  "projects": [
+    {
+      "name": "",
+      "company": "",
+      "description": "",
+      "technologies": [],
+      "outcome": ""
+    }
+  ]
 }

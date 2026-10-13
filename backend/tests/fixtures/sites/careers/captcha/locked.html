@@ -1,0 +1,9 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Apply - React Developer | LockLab</title></head><body>
+<!-- prodex.in (run #23): the Submit button stays disabled for a reason the page does not show -->
+<main><h1>React Developer</h1>
+<form id="f"><label for="n">First Name*</label><input id="n" name="name" required>
+<label for="e">Email*</label><input id="e" type="email" name="email" required>
+<label for="r">Resume*</label><input id="r" type="file" name="resume" required>
+<button type="submit" disabled>SUBMIT APPLICATION</button></form></main>
+<script>window.SUBMITS = 0; document.getElementById('f').addEventListener('submit', (e) => { e.preventDefault(); window.SUBMITS++; });</script>
+</body></html>

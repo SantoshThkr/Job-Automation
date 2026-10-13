@@ -72,11 +72,16 @@ async def test_mobile_development_question_is_not_a_phone_field(answerer):
     assert a.value != "9812345678"
 
 
-async def test_missing_fact_goes_to_manual_review(answerer):
+async def test_skill_years_are_derived_from_work_history(answerer):
+    # Redux years are not set in skills.years, but Pixel Labs (2017-07 .. 2021-03) lists Redux
     a = await answerer.answer(q("How many years of experience do you have with Redux?", "number"))
-    assert a.value is None and a.needs_review  # Redux years are null in the profile
+    assert a.value == "3.5" and a.mode == "derived" and not a.needs_review
+    assert "work-history" in a.note
+
+
+async def test_missing_fact_goes_to_manual_review(answerer):
     a = await answerer.answer(q("What is your date of birth?", "date"))
-    assert a.value is None and a.needs_review
+    assert a.value is None and a.needs_review and a.mode == "ask"
 
 
 async def test_unknown_skill_is_not_invented(answerer):
@@ -89,9 +94,15 @@ async def test_optional_open_question_left_blank(answerer):
     assert a.value == "" and not a.needs_review
 
 
-async def test_open_question_without_ai_needs_review(answerer):
+async def test_open_question_without_ai_is_written_from_profile(answerer):
     a = await answerer.answer(q("Why are you interested in this role?", "textarea"))
-    assert a.value is None and a.needs_review
+    assert a.value and not a.needs_review and a.mode == "composed"
+    assert "Razorpay" in a.value and "React" in a.value and "job.description" in a.sources
+
+
+async def test_unrecognised_open_question_is_not_answered_generically(answerer):
+    a = await answerer.answer(q("Describe your tenure at your longest-running employer", "textarea"))
+    assert a.value is None and a.needs_review  # no generic paragraph for a question it does not understand
 
 
 async def test_about_yourself_uses_profile_summary(answerer, profile):
@@ -123,9 +134,10 @@ async def test_ai_says_needs_human(profile):
 
 
 async def test_ai_hallucinated_number_is_rejected(profile):
-    # the model invents "12 years" which is not in the profile -> guard lowers confidence -> review
-    provider = fake_ollama([{"answer": "12 years at Google", "confidence": 0.95,
-                             "profile_fields_used": ["work_history"], "needs_human": False}])
+    # the model invents "12 years" which is not in the profile -> rejected / guard lowers confidence -> review
+    bad = {"answer": "12 years at Google", "confidence": 0.95, "profile_fields_used": ["work_history"],
+           "needs_human": False, "sources": ["professional.work_history[0]"], "requires_user": False}
+    provider = fake_ollama([bad] * 6)
     ans = Answerer(profile, JobAssistant(provider))
     a = await ans.answer(q("Describe your tenure at your longest-running employer", "text"))
     assert a.needs_review
@@ -141,13 +153,13 @@ async def test_ai_written_motivation_answer(profile):
     assert a.value == text and not a.needs_review, a.note
 
 
-async def test_ai_written_answer_with_invented_employer_needs_review(profile):
+async def test_ai_written_answer_with_invented_employer_is_replaced_by_grounded_text(profile):
     text = "At Google and Netflix I led 40 engineers building Kubernetes platforms."
-    provider = fake_ollama([{"answer": text, "confidence": 0.95}])
+    provider = fake_ollama([{"answer": text, "confidence": 0.95, "sources": [], "requires_user": False}])
     ans = Answerer(profile, JobAssistant(provider))
     a = await ans.answer(q("Why are you interested in this role?", "textarea"))
-    assert a.needs_review
-    assert a.confidence < 0.75
+    assert a.value and "Google" not in a.value and "Netflix" not in a.value
+    assert a.mode == "composed" and not a.needs_review
 
 
 async def test_ai_malformed_response_needs_review(profile):
@@ -188,3 +200,33 @@ async def test_checkbox_answers_must_be_yes_or_no(profile):
     ans = Answerer(profile, JobAssistant(provider))
     a = await ans.answer(q("I hold a valid driving licence", "checkbox", required=True))
     assert a.needs_review
+
+
+async def test_how_many_days_of_notice_is_a_number(answerer, profile):
+    """LinkedIn (run #18): 'How many days is your notice period?' got 'Immediate' and LinkedIn said 'Invalid input'."""
+    days = profile.professional.notice_period_days
+    a = await answerer.answer(q("How many days is your notice period?"))
+    assert a.value == str(days)
+
+
+@pytest.mark.parametrize("question", [
+    "How many years of professional experience do you have in full-stack development?",  # LinkedIn run #18 (said 7)
+    "How many years of work experience do you have with User Interface Design?",  # LinkedIn run #18 (said 7)
+    "How many years of experience do you have in mobile app development?",
+    "How many years of work experience do you have with Databases?",  # LinkedIn run #20 (said 7)
+])
+async def test_years_in_a_discipline_the_profile_does_not_record_are_asked(answerer, question):
+    a = await answerer.answer(q(question))
+    assert a.value in (None, "") or a.needs_review, a
+
+
+async def test_state_management_is_not_the_state_you_live_in(answerer, profile):
+    a = await answerer.answer(q("Years of experience in state management?"))
+    assert a.value != profile.personal.state
+
+
+@pytest.mark.parametrize("question", ["How many years of work experience do you have with Software Development?",
+                                      "How many years of work experience do you have with Front-End Development?"])
+async def test_general_areas_still_use_your_years(answerer, profile, question):
+    a = await answerer.answer(q(question))
+    assert a.value is not None and float(a.value) > 0

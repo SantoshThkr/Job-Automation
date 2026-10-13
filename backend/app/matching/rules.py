@@ -14,7 +14,9 @@ from app.matching.analyzer import (
     JobInput,
     analyze_job,
     normalize_city,
+    normalize_title_aliases,
     seniority_for_years,
+    title_backend_stack,
 )
 from app.matching.skills import canonicalize, skill_def
 from app.models import Decision
@@ -24,7 +26,7 @@ WEIGHTS = {"title": 0.25, "frontend_ratio": 0.20, "skills": 0.30, "experience": 
            "seniority": 0.08, "location": 0.05}
 
 _IMPORTANCE = {"frontend": 1.0, "backend": 1.0, "mobile": 1.0, "data": 1.0, "fullstack_js": 0.8,
-               "testing": 0.6, "devops": 0.5, "general": 0.4, "design": 0.4}
+               "testing": 0.6, "devops": 0.5, "general": 0.4, "design": 0.4, "ai": 0.7}
 
 
 @dataclass
@@ -43,6 +45,9 @@ class MatchResult:
     analysis: dict[str, Any] = field(default_factory=dict)
     ai: dict[str, Any] | None = None
     resume_id: str | None = None
+    ai_focus: bool = False  # frontend + AI (LLM / RAG / agents) role
+    resume_category: str = "frontend"  # frontend | fullstack | ai: which resume flavour fits
+    priority: str = ""  # human-readable preference note (React/Next.js first, Angular lower, ...)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -75,19 +80,30 @@ class _Ctx:
         self.blockers: list[str] = []
         self.flags: list[str] = []  # anything here forces MANUAL_REVIEW instead of APPLY
         self.reasons: list[str] = []
+        self.heavy_stack: list[str] = []
 
 
 def _score_title(profile: Profile, job: JobInput, a: JobAnalysis, ctx: _Ctx) -> float:
     prefs = profile.job_preferences
     title = _norm(job.title)
+    variants = [job.title, normalize_title_aliases(job.title)]
     for kw in prefs.excluded_title_keywords:
-        if keyword_in(kw, job.title):
+        if any(keyword_in(kw, v) for v in variants):
             ctx.blockers.append(f"Title contains excluded keyword '{kw.strip()}'")
             return 0.0
     best_target = max((fuzz.token_set_ratio(title, _norm(t)) for t in prefs.target_titles), default=0)
     best_accept = max((fuzz.token_set_ratio(title, _norm(t)) for t in prefs.acceptable_titles), default=0)
     cat = a.title_category
     if cat == "fullstack":
+        heavy, light = title_backend_stack(job.title)
+        if heavy:
+            ctx.heavy_stack = heavy
+            ctx.reasons.append(f"Title '{job.title}' pairs the frontend with a {'/'.join(heavy)} backend "
+                               "(backend-heavy stacks are deprioritised)")
+            return 35.0 if prefs.accept_fullstack else 15.0
+        if light and prefs.accept_fullstack:
+            ctx.reasons.append(f"Title '{job.title}' is frontend + {'/'.join(light)} (accepted)")
+            return 72.0
         if prefs.accept_fullstack:
             ctx.reasons.append(f"Title '{job.title}' is full-stack (accepted)")
             return 80.0
@@ -301,7 +317,26 @@ def evaluate_rules(profile: Profile, job: JobInput, analysis: JobAnalysis | None
     if a.jd_length < 150 and a.title_category != "frontend":
         ctx.flags.append("Very short job description")
 
+    ratio = a.frontend_ratio
+    if a.title_category in {"generic", "other"}:
+        heavy_req = sorted(x for x in a.required_skills if x in _HEAVY_BACKEND_SKILLS)
+        if heavy_req and (ratio or 0) < 0.6:
+            ctx.flags.append(f"Generic title; the description centres on {', '.join(heavy_req)}")
+    if ctx.heavy_stack:
+        pct = round((ratio or 0) * 100)
+        if ratio is None or ratio < 0.6:
+            ctx.blockers.append(f"Backend-heavy full-stack role ({'/'.join(ctx.heavy_stack)} + frontend, frontend ≈ "
+                                f"{pct}%)")
+        else:
+            ctx.flags.append(f"{'/'.join(ctx.heavy_stack)} full-stack title, but the description is frontend-heavy "
+                             f"(≈ {pct}%)")
+
     score = round(sum(breakdown[k] * w for k, w in WEIGHTS.items()), 1)
+    adjust, priority, ai_focus = _preference(job, a)
+    if adjust:
+        score = round(max(0.0, min(100.0, score + adjust)), 1)
+        ctx.reasons.append(priority)
+    breakdown["preference"] = adjust
     m = profile.matching
     if ctx.blockers:
         decision = Decision.SKIP
@@ -314,10 +349,62 @@ def evaluate_rules(profile: Profile, job: JobInput, analysis: JobAnalysis | None
 
     category = a.title_category if a.title_category in {"frontend", "fullstack", "backend"} else (
         "frontend" if (a.frontend_ratio or 0) >= 0.6 else "fullstack")
+    resume_category = "ai" if ai_focus else ("fullstack" if category in {"fullstack", "backend"}
+                                             or (a.frontend_ratio is not None and a.frontend_ratio < 0.6) else "frontend")
     return MatchResult(
         score=score, decision=decision.value, rule_score=score,
         breakdown={k: round(v, 1) for k, v in breakdown.items()},
         frontend_ratio=None if a.frontend_ratio is None else round(a.frontend_ratio, 2),
         category=category, matched_skills=matched, missing_skills=missing,
         blockers=ctx.blockers, flags=ctx.flags, reasons=ctx.reasons, analysis=a.to_dict(),
+        ai_focus=ai_focus, resume_category=resume_category, priority=priority,
     )
+
+
+_HEAVY_BACKEND_SKILLS = {"Java", "Spring Boot", "Hibernate", ".NET", "PHP", "Go", "Ruby on Rails", "Scala", "C++"}
+
+_REACT_TITLE = re.compile(r"\breact(?:\.?js)?\b(?![\s-]*native)|next\.?js", re.I)
+_ANGULAR_TITLE = re.compile(r"\bangular(?:js)?\b", re.I)
+
+
+def _preference(job: JobInput, a: JobAnalysis) -> tuple[float, str, bool]:
+    """Your stated priorities on top of the fit score: React / Next.js first, frontend + AI welcome,
+    Angular-only roles a little lower. Returns (score adjustment, note, frontend+AI flag)."""
+    ai_mentions = sum(n for s, n in a.skills.items() if (d := skill_def(s)) and d.category == "ai")
+    frontendish = a.title_category == "frontend" or (a.frontend_ratio or 0) >= 0.5
+    ai_in_title = bool(re.search(r"\bai\b|\bgen\s?ai\b|\bllm\b|\bml\b", job.title or "", re.I))
+    ai_focus = frontendish and (ai_mentions >= 3 or (ai_in_title and ai_mentions >= 1))
+    adjust, notes = 0.0, []
+    if _REACT_TITLE.search(job.title or ""):
+        adjust += 3
+        notes.append("React/Next.js role (top priority)")
+    elif _ANGULAR_TITLE.search(job.title or ""):
+        adjust -= 5
+        notes.append("Angular-focused role (React/Next.js preferred)")
+    if ai_focus:
+        adjust += 3
+        notes.append("Frontend + AI role")
+    return adjust, "Priority: " + ", ".join(notes) if notes else "", ai_focus
+
+
+def title_prescreen(profile: Profile, title: str) -> list[str]:
+    """Hard blockers visible from the title alone (excluded keywords, intern/director level, clearly
+    non-frontend role families). Lets discovery skip a job without opening its page."""
+    from app.matching.analyzer import classify_title, title_seniority
+
+    reasons: list[str] = []
+    variants = [title, normalize_title_aliases(title)]
+    for kw in profile.job_preferences.excluded_title_keywords:
+        if any(keyword_in(kw, v) for v in variants):
+            reasons.append(f"Title contains excluded keyword '{kw.strip()}'")
+            return reasons
+    level = title_seniority(title)
+    if level == "intern":
+        reasons.append("Internship/trainee role")
+    elif level == "director":
+        reasons.append("Director/VP/head-level role")
+    cat = classify_title(title)
+    if cat in {"mobile", "devops", "data", "qa"} and not re.search(
+            r"front[\s-]?end|\breact\b(?![\s-]*native)|\bangular\b|\bui\b|\bweb\b|javascript|typescript", title, re.I):
+        reasons.append(f"Title looks like a {cat} role")
+    return reasons

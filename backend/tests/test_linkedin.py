@@ -127,3 +127,41 @@ async def test_already_applied(linkedin, engine, profile):
     assert job.already_applied
     res = await linkedin.apply(job, make_ctx(engine, profile, job, AgentMode.AUTO))
     assert res.outcome == ApplyOutcome.ALREADY_APPLIED
+
+
+async def test_easy_apply_unknown_step_continues_with_navigator(linkedin, engine, profile, site_server):
+    """LinkedIn redesigns a button: the adapter's selectors miss it, the navigator reads the dialog and continues."""
+    from app.portals.types import JobPosting
+
+    job = JobPosting(portal="linkedin", external_id="3099", url=f"{site_server}/linkedin/jobs/view/3099/",
+                     title="Senior Frontend Engineer", company="Acme Cloud", description="React TypeScript")
+    ctx = make_ctx(engine, profile, job, AgentMode.AUTO)
+    res = await linkedin.apply(job, ctx)
+    assert res.outcome == ApplyOutcome.APPLIED, (res.message, res.unresolved)
+    assert await engine.page.evaluate("() => window.SUBMITTED") is True
+    assert not await engine.page.locator("#follow-company-checkbox").is_checked()  # opt-in unticked
+    assert any(t == "handoff" for t, _ in ctx.events)
+
+
+async def test_easy_apply_unknown_step_dry_run_discards_draft(linkedin, engine, profile, site_server):
+    from app.portals.types import JobPosting
+
+    job = JobPosting(portal="linkedin", external_id="3099", url=f"{site_server}/linkedin/jobs/view/3099/",
+                     title="Senior Frontend Engineer", company="Acme Cloud", description="React TypeScript")
+    ctx = make_ctx(engine, profile, job, AgentMode.DRY_RUN)
+    res = await linkedin.apply(job, ctx)
+    assert res.outcome == ApplyOutcome.DRY_RUN and ctx.submits == []
+    assert await engine.page.evaluate("() => window.SUBMITTED") is None
+    assert await engine.page.evaluate("() => window.DISCARDED") is True
+
+
+def test_the_recorded_confirmation_is_the_line_that_says_it_was_sent():
+    """Run #47: the submit was verified by LinkedIn's "Application submitted"; a moment later its post-apply panel
+    had taken over and the record quoted that panel's heading, "Next best action"."""
+    from app.portals.linkedin import confirmation_line
+
+    panel = "Next best action\nFollow Jobgether to stay up to date\nDone"
+    assert confirmation_line(panel, seen="Application submitted") == "Application submitted"
+    assert confirmation_line("Next best action\nYour application was sent to Kitco\nDone") == "Your application was sent to Kitco"
+    assert confirmation_line("", seen="Applied 2 seconds ago") == "Applied 2 seconds ago"
+    assert confirmation_line(panel) == "Next best action" and confirmation_line("") == "LinkedIn"  # nothing better known

@@ -1,0 +1,35 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Apply - Front End developer | UploadLab</title>
+<style>.error{color:#c00}.button{display:inline-block;padding:4px 10px;border:1px solid #393;cursor:pointer}</style></head><body>
+<!-- app.intellohire.com (runs #35-#40): the resume goes through a button. Clicking it attaches the handler that
+     uploads the chosen file and stores its token, then opens the file chooser. A file put straight into the hidden
+     input is never uploaded - "Please attach you resume." -->
+<h1>Front End developer</h1>
+<form id="app">
+ <div class="field required mb2">
+  <div class="ui green icon mini button upload-button" data-action="/submit-lab/api/apply?r=ok" data-input="#resume_file" data-target="#resume_hash"><i class="upload icon"></i> Upload Resume</div>
+  <a href="" id="resume_url"><span class="name-container"></span></a>
+  <input type="file" style="display: none;" id="resume_file">
+  <input class="resume_hash" type="hidden" name="resume_hash" id="resume_hash" value="">
+ </div>
+ <div class="field required"><label>Name</label><input name="name" placeholder="Candidate name"></div>
+ <div class="ui error message" id="errors"></div>
+ <button type="submit" class="ui button">Save application</button>
+</form><div id="out"></div>
+<script>
+  // ?near=1: the button does not name its input (found only by its place and words), and a Dropbox button sits first
+  if (/[?&]near=1/.test(location.search)) { const b = document.querySelector('.upload-button'); b.removeAttribute('data-input');
+    b.dataset.own = '#resume_file'; const d = document.createElement('div'); d.className = 'ui button'; d.textContent = 'Upload from Dropbox';
+    d.onclick = () => { window.DROPBOX = (window.DROPBOX || 0) + 1; }; b.parentNode.insertBefore(d, b); }
+  window.SUBMITS = 0; window.UPLOADS = 0;
+  document.querySelector('.upload-button').addEventListener('click', function () {
+    const input = document.querySelector(this.dataset.input || this.dataset.own), target = document.querySelector(this.dataset.target), action = this.dataset.action;
+    input.onchange = async () => { if (!input.files.length) return;       // wired up on click, as on the real site
+      await fetch(action, { method: 'POST', body: '{}' }).then(r => r.text()); window.UPLOADS++;
+      target.value = 'hash-' + window.UPLOADS; document.querySelector('.name-container').textContent = input.files[0].name; };
+    input.click();
+  });
+  document.getElementById('app').addEventListener('submit', (e) => { e.preventDefault(); const errors = document.getElementById('errors');
+    if (!document.getElementById('resume_hash').value) { errors.innerHTML = '<ul class="list"><li class="error">Please attach you resume.</li></ul>'; return; }
+    errors.innerHTML = ''; window.SUBMITS++; document.getElementById('app').hidden = true;
+    document.getElementById('out').innerHTML = '<div role="status">Your application has been received.</div>'; });
+</script></body></html>

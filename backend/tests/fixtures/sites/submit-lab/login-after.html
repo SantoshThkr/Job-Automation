@@ -1,0 +1,16 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Front End developer | LoginAfterLab</title></head><body>
+<!-- app.intellohire.com (run #41): "Save" posts the form, then the site goes to its own login page (phone + "Get OTP").
+     That page asks its backend something and gets {"success": true}: none of it confirms the application. -->
+<h1>Front End developer</h1>
+<form id="app">
+ <label>Name <input name="name" required></label>
+ <label>Email <input name="email" type="email" required></label>
+ <label>Resume <input type="file" name="resume" required></label>
+ <button type="submit">Save</button>
+</form>
+<script>
+  window.SUBMITS = 0;
+  document.getElementById('app').addEventListener('submit', async (e) => { e.preventDefault(); window.SUBMITS++;
+    await fetch('/submit-lab/api/apply?r=plain', { method: 'POST', body: '{}' });
+    location.href = '/submit-lab/login.html'; });
+</script></body></html>

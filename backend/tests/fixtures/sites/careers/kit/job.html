@@ -1,0 +1,20 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Frontend Engineer - KitCo Careers</title></head><body>
+<header><nav><a href="#">KitCo</a> <a href="#">Products</a> <a href="#">Careers</a></nav></header>
+<main>
+<form id="search" onsubmit="window.SEARCHED = true; return false;"><h3>Find jobs</h3>
+ <label for="s_kw">Keywords</label><input id="s_kw" name="q">
+ <label for="s_loc">Location</label><select id="s_loc"><option>All</option><option>Bengaluru</option><option>Pune</option></select>
+ <label for="s_within">Within</label><select id="s_within"><option>Radius</option><option>10 km</option><option>25 km</option></select>
+ <label for="s_sort">Sort Order</label><select id="s_sort"><option>Select</option><option>Date Posted - New</option></select>
+ <button type="submit">Search</button></form>
+<article><h1>Frontend Engineer</h1><p>KitCo · Bengaluru · Full time</p>
+ <h2>About the role</h2><p>Build fast, accessible React and TypeScript interfaces for our payments dashboard. 5+ years of
+ frontend experience, Next.js, Redux, testing with Jest.</p>
+ <a class="btn" href="apply.html">Apply Now</a></article>
+<form id="contact" onsubmit="window.CONTACTED = true; return false;"><h3>Let's talk about your project</h3>
+ <label for="c_name">Your name</label><input id="c_name">
+ <label for="c_email">Work email</label><input id="c_email" type="email">
+ <label for="c_size">Company size</label><select id="c_size"><option>1-10</option><option>11-50</option><option>51+</option></select>
+ <label for="c_msg">How can we help?</label><textarea id="c_msg"></textarea>
+ <button type="submit">Send message</button></form>
+</main></body></html>

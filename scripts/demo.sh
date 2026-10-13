@@ -26,7 +26,7 @@ export PJA_BROWSER_HEADLESS="${HEADLESS:-false}"
 
 (cd backend && exec .venv/bin/python -m tests.mock_server --port 8765) &
 MOCK=$!
-(cd backend && exec .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000) &
+(cd backend && exec .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-server-header) &
 API=$!
 (cd frontend && exec npm run dev) &
 WEB=$!

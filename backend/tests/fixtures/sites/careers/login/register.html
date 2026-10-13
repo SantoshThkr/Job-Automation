@@ -1,0 +1,16 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Create account - Gamma Systems</title></head><body>
+<main><h1>Create your candidate account</h1>
+<form id="f"><label for="em">Email *</label><input id="em" type="email" name="email" required>
+<label for="fn">First name *</label><input id="fn" name="first" required>
+<label for="ln">Last name *</label><input id="ln" name="last" required>
+<label for="p1">Password *</label><input id="p1" type="password" name="password" required>
+<label for="p2">Confirm password *</label><input id="p2" type="password" name="password2" required>
+<label><input type="checkbox" id="tos" name="terms" required> I agree to the privacy policy and terms and conditions *</label>
+<button type="submit">Create account</button></form><p id="err" hidden></p></main>
+<script>
+document.getElementById('f').addEventListener('submit', (e) => { e.preventDefault();
+  if (!document.getElementById('tos').checked || p1.value !== p2.value || !p1.value) { err.hidden = false; err.textContent = 'Please complete all fields'; return; }
+  localStorage.setItem('gamma_account', em.value);
+  document.querySelector('main').innerHTML = '<h1>Verify your email</h1><p>We have sent a verification link to ' + em.value + '. Please check your inbox.</p>';
+});
+</script></body></html>

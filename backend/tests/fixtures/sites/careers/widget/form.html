@@ -1,0 +1,37 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Apply - Omicron</title>
+<style>ul[role=listbox]{border:1px solid #999;list-style:none;padding:0;margin:0;position:absolute;background:#fff}
+li[role=option]{padding:4px 8px;cursor:pointer} .err{color:#c00}</style></head><body>
+<main><h1>Apply: Senior Frontend Engineer</h1>
+<form id="f">
+<label for="n">Full name *</label><input id="n" name="name" required>
+<label for="e">Email *</label><input id="e" type="email" name="email" required>
+<div class="field"><span id="np-label">Notice period *</span>
+  <button type="button" id="np" aria-haspopup="listbox" aria-labelledby="np-label" aria-required="true">Select One</button>
+  <ul role="listbox" id="np-list" hidden><li role="option">Immediate</li><li role="option">Up to 30 days</li><li role="option">31-60 days</li><li role="option">More than 60 days</li></ul></div>
+<div class="field"><label for="city">Current city *</label>
+  <input id="city" role="combobox" aria-autocomplete="list" aria-required="true" autocomplete="off">
+  <ul role="listbox" id="city-list" hidden></ul></div>
+<label for="w">Why are you interested in this role? *</label><textarea id="w" name="why" required maxlength="600"></textarea>
+<label for="r">Resume *</label><input id="r" type="file" name="resume" required>
+<p class="err" id="err" hidden></p>
+<button type="submit">Submit application</button></form></main>
+<script>
+const np = document.getElementById('np'), npl = document.getElementById('np-list');
+np.onclick = () => { npl.hidden = !npl.hidden; };
+npl.querySelectorAll('[role=option]').forEach(o => o.onclick = () => { np.textContent = o.textContent; npl.hidden = true; });
+const CITIES = ['Bengaluru, Karnataka', 'Noida, Uttar Pradesh', 'Pune, Maharashtra', 'Chennai, Tamil Nadu'];
+const city = document.getElementById('city'), cl = document.getElementById('city-list');
+city.addEventListener('input', () => {
+  const v = city.value.toLowerCase(); cl.innerHTML = '';
+  CITIES.filter(c => v.length >= 2 && c.toLowerCase().startsWith(v.slice(0, 3))).forEach(c => {
+    const li = document.createElement('li'); li.setAttribute('role', 'option'); li.textContent = c;
+    li.onclick = () => { city.value = c; city.dataset.chosen = c; cl.hidden = true; }; cl.appendChild(li); });
+  cl.hidden = !cl.children.length; delete city.dataset.chosen;
+});
+document.getElementById('f').addEventListener('submit', (e) => { e.preventDefault();
+  const err = document.getElementById('err');
+  if (np.textContent === 'Select One' || !city.dataset.chosen) { err.hidden = false; err.textContent = 'Please choose a notice period and a city from the list'; return; }
+  window.__widget = {np: np.textContent, city: city.dataset.chosen, why: document.getElementById('w').value};
+  document.querySelector('main').innerHTML = '<h1>Thank you for applying!</h1><p>Your application has been submitted.</p>';
+});
+</script></body></html>

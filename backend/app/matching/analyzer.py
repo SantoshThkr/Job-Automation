@@ -90,10 +90,52 @@ SENIORITY_RANK = {"intern": 0, "junior": 1, "mid": 2, "unspecified": 2, "senior"
                   "manager": 5, "principal": 6, "director": 7}
 
 
+# Backend technologies named in a title next to a frontend one ("Java React Developer", ".NET + React",
+# "Python React Full Stack"). Heavy stacks are usually backend-dominated roles; light ones are the
+# "React + Python / React + Node" combinations a frontend engineer can reasonably take.
+_TITLE_BACKEND_HEAVY = {
+    "Java": r"\bjava\b(?!\s*script)|\bj2ee\b|\bspring(?:\s*boot)?\b",
+    ".NET": r"\.net\b|\bdot\s*net\b|\bdotnet\b|\bc#|\basp\.net\b",
+    "PHP": r"\bphp\b|\blaravel\b",
+    "Go": r"\bgolang\b",
+    "Ruby": r"\bruby\b|\brails\b",
+    "Scala": r"\bscala\b",
+    "C++": r"\bc\+\+",
+    "Salesforce": r"\bsalesforce\b",
+}
+_TITLE_BACKEND_LIGHT = {
+    "Python": r"\bpython\b|\bdjango\b|\bflask\b|\bfastapi\b",
+    "Node.js": r"\bnode(?:\.?js)?\b|\bnest\.?js\b|\bexpress(?:\.?js)?\b",
+}
+_TITLE_FRONTEND_TECH = re.compile(
+    r"front[\s-]?end|\bui\b|\breact(?:\.?js)?\b(?![\s-]*native)|\bangular(?:js)?\b|\bvue(?:\.?js)?\b|next\.?js|"
+    r"\btypescript\b|\bjavascript\b", re.I)
+
+
+def title_backend_stack(title: str) -> tuple[list[str], list[str]]:
+    """(heavy, light) backend technologies named in a job title."""
+    t = title or ""
+    heavy = [name for name, rx in _TITLE_BACKEND_HEAVY.items() if re.search(rx, t, re.I)]
+    light = [name for name, rx in _TITLE_BACKEND_LIGHT.items() if re.search(rx, t, re.I)]
+    return heavy, light
+
+
+def normalize_title_aliases(title: str) -> str:
+    """Spelling variants used by recruiters: 'Dot Net' -> '.net', 'Back-End' -> 'backend', ..."""
+    t = title or ""
+    t = re.sub(r"\bdot\s*net\b|\bdotnet\b", ".net", t, flags=re.I)
+    t = re.sub(r"\bback[\s-]+end\b", "backend", t, flags=re.I)
+    t = re.sub(r"\bfront[\s-]+end\b", "frontend", t, flags=re.I)
+    t = re.sub(r"\bfull[\s-]+stack\b", "fullstack", t, flags=re.I)
+    return t
+
+
 def classify_title(title: str) -> str:
     t = title or ""
     for cat, pattern in _TITLE_CATEGORIES:
         if re.search(pattern, t, re.I):
+            if cat == "frontend" and any(title_backend_stack(t)):
+                return "fullstack"  # "Java React Developer", ".NET + React", "React + Node Developer"
             return cat
     if _GENERIC_TITLE.search(t):
         return "generic"

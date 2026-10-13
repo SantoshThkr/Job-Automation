@@ -15,19 +15,24 @@ pick_python() {
 
 PY=$(pick_python) || { echo "Python 3.11-3.13 is required (brew install python@3.13)"; exit 1; }
 echo "==> Using $PY ($($PY --version))"
-if [ ! -x backend/.venv/bin/python ]; then
+# (re)create the venv when missing or broken (e.g. the project folder was moved/renamed)
+if ! backend/.venv/bin/python -c 'import sys' >/dev/null 2>&1; then
+  rm -rf backend/.venv
   "$PY" -m venv backend/.venv
 fi
-backend/.venv/bin/pip install -q --upgrade pip
-backend/.venv/bin/pip install -q -r backend/requirements-dev.txt
+backend/.venv/bin/python -m pip install -q --upgrade pip
+backend/.venv/bin/python -m pip install -q -r backend/requirements-dev.txt
 echo "==> Installing Playwright Chromium"
-backend/.venv/bin/playwright install chromium
+backend/.venv/bin/python -m playwright install chromium
 
 echo "==> Installing dashboard dependencies"
 command -v npm >/dev/null || { echo "Node.js 20+ is required (brew install node)"; exit 1; }
 (cd frontend && npm install --no-fund --no-audit)
 
 [ -f .env ] || { cp .env.example .env; echo "==> Created .env"; }
+chmod 600 .env 2>/dev/null || true
+# keep personal data and secrets out of Git: pre-commit / pre-push checks for this clone
+if [ -d .git ]; then git config core.hooksPath .githooks && echo "==> Privacy hooks enabled (.githooks)"; fi
 (cd backend && .venv/bin/python -m app.cli init)
 
 if command -v ollama >/dev/null 2>&1; then

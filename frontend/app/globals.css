@@ -185,3 +185,20 @@ label.check { display: inline-flex; gap: 6px; align-items: center; cursor: point
 .dot.err { background: var(--err); }
 .empty { color: var(--muted); padding: 24px; text-align: center; }
 .pager { display: flex; gap: 8px; justify-content: flex-end; align-items: center; margin-top: 10px; }
+
+/* --- live agent view & dashboard questions --------------------------------- */
+.questions { display: grid; gap: 10px; margin-top: 8px; }
+.question { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; color: var(--text); }
+.question .q { display: block; font-weight: 600; margin-bottom: 6px; }
+.question input[type=text], .question input[type=number], .question select, .question textarea { width: 100%; max-width: 520px; }
+.now { border-top: 1px solid var(--border); margin-top: 12px; padding-top: 10px; display: grid; gap: 4px; }
+.now .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.now .step { font-weight: 600; }
+.phase { display: inline-block; font-size: 11.5px; padding: 1px 8px; border-radius: 99px; background: var(--info-bg); color: var(--info); }
+.runs { width: 100%; border-collapse: collapse; font-size: 13px; }
+.runs td, .runs th { padding: 6px 4px; border-bottom: 1px solid var(--border); text-align: left; }
+.runs th { color: var(--muted); font-weight: 500; }
+.stats.stats-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+@media (max-width: 900px) { .stats.stats-5 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+/* multi-line activity entries ("Question detected / Answer source / Answer mode / Confidence / Verified") */
+.timeline li > span:last-child, .timeline li > div:last-child { white-space: pre-line; }

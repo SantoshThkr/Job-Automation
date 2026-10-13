@@ -28,6 +28,18 @@ def _setup_env(base: Path) -> None:
     os.environ["PJA_ACTION_TIMEOUT_MS"] = "3000"
     os.environ["PJA_REVIEW_WAIT_TIMEOUT_S"] = "20"
     os.environ["PJA_LOGIN_WAIT_TIMEOUT_S"] = "5"
+    os.environ["PJA_AUTO_HUMAN_WAIT_S"] = "0"
+    os.environ["PJA_NOTIFY"] = "false"
+    # the memory guard reads the real machine: tests that run the agent must not depend on how busy this Mac is
+    # (tests/test_memory_guard.py switches it on and feeds it known states)
+    os.environ["PJA_MEMORY_GUARD"] = "false"
+    os.environ["PJA_ATS_ACCOUNT_PASSWORD"] = ""
+    # API protection: Starlette's TestClient addresses the app as "testserver"; the rate limiter is switched on by
+    # the security tests themselves so unrelated tests never depend on how many requests ran before them
+    os.environ["PJA_ALLOWED_HOSTS"] = "testserver,localhost,127.0.0.1"
+    os.environ["PJA_RATE_LIMIT_ENABLED"] = "false"
+    os.environ["PJA_API_TOKEN"] = ""
+    os.environ["PJA_API_HOST"] = "127.0.0.1"
 
 
 def write_test_profile(base: Path) -> Path:

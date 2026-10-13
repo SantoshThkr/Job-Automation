@@ -2,24 +2,30 @@
 
 import { useState } from "react";
 import { QA, api } from "@/lib/api";
+import { uniqueStrings } from "@/lib/format";
 import { useAction } from "@/lib/hooks";
 
 /** Answer a question the assistant could not answer; the answer is remembered for future forms. */
 export function AnswerForm({ qa, onSaved }: { qa: QA; onSaved: () => void }) {
   const [value, setValue] = useState(qa.answer ?? "");
-  const [saved, setSaved] = useState(false);
+  const [saved, setSaved] = useState<string | null>(null);
   const { busy, error, run } = useAction();
-  if (saved) return <div className="small" style={{ color: "var(--ok)" }}>Saved - used from now on</div>;
+  const choices = uniqueStrings(qa.options);
+  if (saved) return <div className="small" style={{ color: "var(--ok)" }}>{saved}</div>;
   return (
     <form className="row" style={{ marginTop: 6 }} onSubmit={async (e) => {
       e.preventDefault();
-      const ok = await run(() => api.saveAnswer(qa.question, value));
-      if (ok) { setSaved(true); onSaved(); }
+      const res = await run(() => api.saveAnswer(qa.question, value, qa.job_id));
+      if (res) {
+        const n = res.requeued_jobs?.length ?? 0;
+        setSaved(n ? `Saved - ${n} job(s) queued again automatically` : "Saved - used from now on");
+        onSaved();
+      }
     }}>
-      {qa.options.length ? (
+      {choices.length ? (
         <select value={value} onChange={(e) => setValue(e.target.value)} required>
           <option value="">Choose…</option>
-          {qa.options.map((o) => <option key={o} value={o}>{o}</option>)}
+          {choices.map((o) => <option key={o} value={o}>{o}</option>)}
         </select>
       ) : (
         <input type="text" value={value} onChange={(e) => setValue(e.target.value)} placeholder="Your answer" required />

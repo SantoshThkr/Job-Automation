@@ -17,9 +17,11 @@ from playwright.async_api import Error as PlaywrightError, Page
 from app.browser.errors import LoginRequired
 from app.browser.forms import collect_errors, summarize_unresolved
 from app.browser.selectors import T
-from app.engine.context import ApplyContext, GateResult, SubmitDecision
+from app.engine.context import ApplyContext, SubmitDecision
+from app.engine.questions import ask_and_fill
+from app.engine.submission import confirmation_since, page_state
 from app.portals.base import PortalAdapter, SearchQuery
-from app.portals.common import extract_cards, first_text, all_texts, page_has_success
+from app.portals.common import EXPIRED_TEXT, all_texts, extract_cards, first_text, generic_apply_button
 from app.portals.types import ApplyOutcome, ApplyResult, JobPosting
 
 log = logging.getLogger(__name__)
@@ -57,7 +59,8 @@ APPLY_BTN = T("instahyre apply", css=["button#interested-btn", "button.apply-btn
               text=["Apply", "Interested", "I'm interested", "Apply now"])
 APPLIED_STATE = T("instahyre applied", css=["button.applied", "button[disabled].apply-btn", ".already-applied",
                                             "[class*='applied-status']"],
-                  role=("button", r"^\s*applied\s*$"))
+                  role=("button", r"^\W*(?:applied|application\s+sent!?)\s*$"),  # 2026: "✓ Application sent!" + date
+                  text=["Application sent!", "Application sent"])
 MODAL = T("instahyre modal", css=[".modal.in", ".modal.show", "[role='dialog']:visible", ".apply-modal"])
 MODAL_CONFIRM = T("instahyre confirm", css=["button#apply-confirm", ".modal button[type='submit']"],
                   role=("button", r"^\s*(apply|submit|send|confirm|apply now)\s*$"))
@@ -173,6 +176,11 @@ class InstahyreAdapter(PortalAdapter):
         if key == "applied":
             return ApplyResult(ApplyOutcome.ALREADY_APPLIED, "Instahyre shows this job as applied")
         if btn is None:
+            found = await generic_apply_button(page)  # markup changed: find the button by what it says
+            btn = found[1] if found else None
+        if btn is None:
+            if EXPIRED_TEXT.search(await self.engine.body_text(page, limit=3000)):
+                return ApplyResult(ApplyOutcome.EXPIRED, "Job is no longer accepting applications")
             return ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED, "Apply button not found",
                                screenshot=await self.engine.screenshot(f"instahyre-noapply-{job.external_id}"))
         decision = await ctx.decide_submit(
@@ -188,40 +196,50 @@ class InstahyreAdapter(PortalAdapter):
             text = await self._success(page)
             return ApplyResult(ApplyOutcome.APPLIED if text else ApplyOutcome.MANUAL_ACTION_REQUIRED,
                                "Submitted by you", confirmation_text=text, submit_attempted=True)
+        self._before = await page_state(page)  # text already on the page never confirms
         await ctx.mark_submit_attempt()
         await self.engine.click(btn)
         for _ in range(3):
             key, _el = await self.engine.wait_for_any({"success": SUCCESS, "modal": MODAL, "applied": APPLIED_STATE},
                                                       timeout_ms=8000)
             text = await self._success(page)
+            if not text and key == "applied":  # the Apply button turned into Instahyre's 'Applied' state
+                text = "Instahyre now shows this job as applied"
             if text:
                 return ApplyResult(ApplyOutcome.APPLIED, "Applied on Instahyre", confirmation_text=text,
-                                   submit_attempted=True)
+                                   submit_attempted=True, verification="confirmed",
+                                   evidence=[f"portal_confirmation: {text[:160]}"])
             if key == "modal":
                 res = await self._complete_modal(page, ctx)
                 if res is not None:
                     return res
                 continue
             break
-        return ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED, "Clicked Apply but no confirmation was detected",
-                           submit_attempted=True, screenshot=await self.engine.screenshot("instahyre-unconfirmed"))
+        return ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED,
+                           "Submitted - confirmation not verified: clicked Apply, Instahyre showed neither its success "
+                           "message nor the 'Applied' state", submit_attempted=True, verification="uncertain",
+                           evidence=["apply_clicked"], screenshot=await self.engine.screenshot("instahyre-unconfirmed"))
 
     async def _complete_modal(self, page: Page, ctx: ApplyContext) -> ApplyResult | None:
         modal = await self.engine.find(MODAL, timeout_ms=2000)
         if modal is None:
             return None
-        report = await ctx.form_filler().fill(modal)
+        filler = ctx.form_filler()
+        report = await filler.fill(modal)
         unresolved = summarize_unresolved(report)
         if unresolved:
-            res = await ctx.wait_for_human("manual", "Instahyre asks: " + "; ".join(unresolved[:4]), page=page,
-                                           detect_done=lambda: self._success(page))
-            if res == GateResult.SUBMITTED or (res == GateResult.RESOLVED and await self._success(page)):
+            # the same question flow as every other portal: asked once in the dashboard, filled in, remembered
+            out = await ask_and_fill(ctx, page, modal, filler, report.unresolved)
+            if await self._success(page):  # you finished it in the browser meanwhile
                 return ApplyResult(ApplyOutcome.APPLIED, "Applied on Instahyre (completed by you)",
                                    confirmation_text=await self._success(page), submit_attempted=True)
-            if res not in (GateResult.RESOLVED, GateResult.APPROVE):
+            if out.skipped_by_you:
+                return ApplyResult(ApplyOutcome.REJECTED, "You chose to skip this application", submit_attempted=True)
+            if not out.answered or out.still_missing:
+                missing = out.still_missing or unresolved
                 return ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED,
-                                   "Instahyre questions need your answers: " + "; ".join(unresolved[:4]),
-                                   submit_attempted=True, unresolved=unresolved)
+                                   "Instahyre questions need your answers: " + "; ".join(missing[:4]),
+                                   submit_attempted=True, unresolved=missing)
         confirm = await self.engine.find(MODAL_CONFIRM, root=modal, timeout_ms=2000)
         if confirm is None:
             return ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED, "Could not find the confirm button",
@@ -240,7 +258,8 @@ class InstahyreAdapter(PortalAdapter):
                 return await self.engine.text_of(SUCCESS, root=page) or "Applied"
         except PlaywrightError:
             return ""
-        return await page_has_success(page)
+        before = getattr(self, "_before", None)
+        return await confirmation_since(page, before) if before is not None else ""
 
 
 def _id_from_url(url: str) -> str:

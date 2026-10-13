@@ -81,6 +81,28 @@ class OllamaProvider:
         self._down_until = 0.0  # circuit breaker after connection failures
         self._health_cache: tuple[float, dict[str, Any]] | None = None
         self._supports_think_flag = True
+        self.keep_alive = s.ollama_keep_alive
+        self.paused = ""  # why the model must not be loaded right now (memory pressure); "" = may be used
+        self.loaded = False  # a request was sent since the last unload (so there may be a model to free)
+
+    def pause(self, reason: str) -> None:
+        """Do not load the model (it needs ~3 GB): the machine is short of memory. Requests fail as 'unavailable'."""
+        self.paused = reason
+
+    def resume(self) -> None:
+        self.paused = ""
+
+    async def unload(self) -> bool:
+        """Ask the server to free the model's memory now (instead of after its keep-alive). Never raises."""
+        if not self.enabled or not self.loaded:
+            return False
+        self.loaded = False
+        try:
+            async with self._client(timeout=10) as c:
+                r = await c.post("/api/generate", json={"model": self.model, "keep_alive": 0})
+                return r.status_code < 400
+        except httpx.HTTPError:
+            return False
 
     def _client(self, timeout: float | None = None) -> httpx.AsyncClient:
         return httpx.AsyncClient(base_url=self.base_url, timeout=timeout or self.timeout, transport=self._transport)
@@ -90,27 +112,49 @@ class OllamaProvider:
         if use_cache and self._health_cache and now - self._health_cache[0] < 30:
             return self._health_cache[1]
         result: dict[str, Any] = {"enabled": self.enabled, "available": False, "model": self.model,
-                                  "model_present": False, "models": [], "error": ""}
+                                  "model_present": False, "models": [], "error": "", "url": self.base_url}
         if not self.enabled:
             result["error"] = "AI disabled (PJA_AI_ENABLED=false)"
         else:
-            try:
-                async with self._client(timeout=5) as c:
-                    r = await c.get("/api/tags")
-                    r.raise_for_status()
-                    models = [m.get("name", "") for m in r.json().get("models", [])]
-                result["models"] = models
-                result["available"] = True
-                result["model_present"] = any(m == self.model or m.split(":")[0] == self.model for m in models)
-                if not result["model_present"]:
-                    result["error"] = f"Model '{self.model}' not pulled. Run: ollama pull {self.model}"
-            except Exception as exc:  # connection refused, timeout ...
-                result["error"] = f"Ollama not reachable at {self.base_url}: {exc.__class__.__name__}"
+            result.update(await self._probe(self.base_url))
+            if not result["model_present"]:
+                # "localhost" is two addresses (::1 and 127.0.0.1) and two different programs may listen on them -
+                # e.g. a Docker container publishing the same port. Use the one that actually has the model.
+                for alt in self._loopback_alternatives():
+                    probe = await self._probe(alt)
+                    if probe["model_present"]:
+                        log.warning("Ollama model '%s' is not served at %s but is at %s - using that address "
+                                    "(set PJA_OLLAMA_URL=%s)", self.model, self.base_url, alt, alt)
+                        self.base_url = alt
+                        result.update(probe, url=alt)
+                        break
         self._health_cache = (now, result)
         return result
 
+    def _loopback_alternatives(self) -> list[str]:
+        parts = httpx.URL(self.base_url)
+        if parts.host not in {"localhost", "127.0.0.1", "::1"}:
+            return []
+        return [str(parts.copy_with(host=h)).rstrip("/") for h in ("127.0.0.1", "::1", "localhost") if h != parts.host]
+
+    async def _probe(self, base_url: str) -> dict[str, Any]:
+        out: dict[str, Any] = {"available": False, "model_present": False, "models": [], "error": ""}
+        try:
+            async with httpx.AsyncClient(base_url=base_url, timeout=5, transport=self._transport) as c:
+                r = await c.get("/api/tags")
+                r.raise_for_status()
+                models = [m.get("name", "") for m in r.json().get("models", [])]
+            out["models"], out["available"] = models, True
+            out["model_present"] = any(m == self.model or m.split(":")[0] == self.model for m in models)
+            if not out["model_present"]:
+                out["error"] = (f"Model '{self.model}' is not available at {base_url} (it serves: "
+                                f"{', '.join(models[:6]) or 'no models'}). Run: ollama pull {self.model}")
+        except Exception as exc:  # connection refused, timeout ...
+            out["error"] = f"Ollama not reachable at {base_url}: {exc.__class__.__name__}"
+        return out
+
     async def is_available(self) -> bool:
-        if not self.enabled or time.monotonic() < self._down_until:
+        if not self.enabled or self.paused or time.monotonic() < self._down_until:
             return False
         h = await self.health()
         return bool(h["available"] and h["model_present"])
@@ -119,6 +163,8 @@ class OllamaProvider:
                    temperature: float = 0.1, max_tokens: int = 700) -> str:
         if not self.enabled:
             raise AIUnavailable("AI disabled")
+        if self.paused:
+            raise AIUnavailable(f"local AI paused: {self.paused}")
         if time.monotonic() < self._down_until:
             raise AIUnavailable("Ollama recently unreachable (circuit open)")
         body: dict[str, Any] = {
@@ -127,6 +173,9 @@ class OllamaProvider:
             "stream": False,
             "options": {"temperature": temperature, "num_predict": max_tokens},
         }
+        if self.keep_alive:
+            body["keep_alive"] = self.keep_alive
+        self.loaded = True
         if json_schema is not None:
             body["format"] = json_schema
         elif json_mode:

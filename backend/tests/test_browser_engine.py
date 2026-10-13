@@ -215,8 +215,10 @@ async def test_form_filler_fills_from_profile(engine, site_server, profile):
     assert await page.locator("#prefilled").input_value() == "Pune"  # prefilled values are kept
     assert report.resume_uploaded
     assert await page.locator("#resume").evaluate("el => el.files.length") == 1
-    # the open-ended question cannot be answered without AI -> unresolved, not invented
-    assert any("Why do you want" in i.question for i in report.items if i.status in {"unresolved", "skipped"})
+    # the open-ended question is written from the verified profile + job (no AI needed), filled and verified
+    why = next(i for i in report.items if "Why do you want" in i.question)
+    assert why.status == "filled" and why.verified and why.answer.mode == "composed"
+    assert "React" in why.answer.value and "Acme" in why.answer.value
     assert ("First Name", "Asha") in recorded
 
 

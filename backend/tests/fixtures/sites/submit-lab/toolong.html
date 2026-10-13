@@ -1,0 +1,22 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Apply - Frontend Engineer - LimitLab</title>
+<style>.error{color:#c00}</style></head><body>
+<h1>Apply for Frontend Engineer</h1>
+<form id="app">
+ <label for="nm">Full name *</label><input id="nm" name="name" required>
+ <label for="em">Email *</label><input id="em" name="email" type="email" required>
+ <label for="msg">Why do you want to join us? *</label><textarea id="msg" name="message" required></textarea>
+ <label for="cv">Resume *</label><input id="cv" name="resume" type="file" required>
+ <button type="submit">Submit application</button>
+</form><div id="out"></div>
+<script>
+  window.SUBMITS = 0; window.REFUSALS = 0; window.SENT = '';
+  const form = document.getElementById('app'), msg = document.getElementById('msg');
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    document.querySelectorAll('.error').forEach(x => x.remove());
+    if (msg.value.length > 200) { window.REFUSALS++;
+      msg.insertAdjacentHTML('afterend', '<div class="error">Message can\'t be more than 200 characters</div>'); return; }
+    window.SUBMITS++; window.SENT = msg.value; form.hidden = true;
+    document.getElementById('out').innerHTML = '<div class="alert alert-success" role="status">Your application has been received.</div>';
+  });
+</script></body></html>

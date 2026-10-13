@@ -7,6 +7,7 @@ The assistant never invents facts that are not present here.
 from __future__ import annotations
 
 import json
+from datetime import date
 import logging
 import shutil
 import threading
@@ -87,15 +88,31 @@ class Professional(_Model):
     summary: str = ""
     highlights: list[str] = Field(default_factory=list)
     work_history: list[WorkExperience] = Field(default_factory=list)
+    # true = the list above names every employer you have worked for, so "Have you worked for us before?" is
+    # answered "No" for any other company. Unset = that question is always left for you.
+    work_history_complete: bool | None = None
     education: list[Education] = Field(default_factory=list)
     certifications: list[str] = Field(default_factory=list)
     languages: list[str] = Field(default_factory=lambda: ["English"])
+
+
+class Project(_Model):
+    """A project you worked on (used to answer "tell us about a project / an achievement" questions)."""
+
+    name: str = ""
+    company: str = ""
+    description: str = ""
+    technologies: list[str] = Field(default_factory=list)
+    outcome: str = ""  # measurable result, only if true (e.g. "reduced page load time by 40%")
 
 
 class Skills(_Model):
     primary: list[str] = Field(default_factory=list)
     secondary: list[str] = Field(default_factory=list)
     years: dict[str, float | None] = Field(default_factory=dict)
+    # true = primary + secondary list every skill you would claim: "years of experience with <anything else>" is then
+    # answered 0 and "do you have experience with <anything else>" No. Unset = those are suggested and left for you.
+    complete: bool | None = None
 
     @property
     def all(self) -> list[str]:
@@ -117,8 +134,11 @@ class WorkPreferences(_Model):
     willing_to_relocate: bool = False
     requires_sponsorship: bool = False
     authorized_countries: list[str] = Field(default_factory=lambda: ["India"])
+    citizenship: list[str] = Field(default_factory=list)  # countries you are a citizen of (empty = asked when a form needs it)
     willing_to_travel: bool | None = None
     open_to_shifts: bool | None = None
+    open_to_contract: bool | None = None  # contract / temporary roles (None = asked when a form wants to know)
+    interview_availability: str = ""  # e.g. "Available for interviews on weekdays" (empty = ask each time)
 
 
 class JobPreferences(_Model):
@@ -196,6 +216,7 @@ class Profile(_Model):
     search: SearchConfig = Field(default_factory=SearchConfig)
     matching: MatchingConfig = Field(default_factory=MatchingConfig)
     resumes: list[ResumeEntry] = Field(default_factory=list)
+    projects: list[Project] = Field(default_factory=list)
     custom_answers: list[CustomAnswer] = Field(default_factory=list)
     diversity: Diversity = Field(default_factory=Diversity)
 
@@ -287,11 +308,28 @@ def validate_profile(profile: Profile) -> list[ProfileIssue]:
                 warn(f"resumes.{r.id}", f"Resume file not found: {r.path}")
     if not profile.search.queries:
         err("search.queries", "At least one search query is required.")
+    # contradictions make answers ambiguous ("are you currently employed?", "how soon can you join?")
+    from app.answers.question_bank import parse_profile_date
+
+    lwd = parse_profile_date(pr.last_working_day)
+    current = [w for w in pr.work_history if (w.end or "present").strip().lower() in {"present", "current", ""}]
+    if lwd and lwd < date.today() and current and not pr.serving_notice:
+        warn("professional.last_working_day",
+             f"Last working day ({pr.last_working_day}) has passed but {current[0].company or 'a role'} is still marked "
+             "'present' - set that role's end date (or clear last_working_day); until then 'are you currently employed' "
+             "questions are asked.")
+    if pr.last_working_day and lwd is None:
+        warn("professional.last_working_day", "Last working day is not a recognisable date (use e.g. '5 March 2026').")
     return issues
 
 
+_DISCOVERY_ONLY = ("search.", "skills.")  # config errors that affect searching/matching, not submitting
+
+
 def blocking_issues(profile: Profile) -> list[ProfileIssue]:
-    return [i for i in validate_profile(profile) if i.severity == "error"]
+    """Issues that block real submissions (missing identity / contact facts, no resume, not confirmed)."""
+    return [i for i in validate_profile(profile)
+            if i.severity == "error" and not i.field.startswith(_DISCOVERY_ONLY)]
 
 
 class ProfileStore:
@@ -318,6 +356,7 @@ class ProfileStore:
             log.warning("Created %s from profile.example.json - please fill in your details", self.path)
         else:
             self.path.write_text(Profile().model_dump_json(indent=2), encoding="utf-8")
+        self.path.chmod(0o600)  # your details: your account only
 
     def load(self, force: bool = False) -> Profile:
         with self._lock:
@@ -354,6 +393,7 @@ class ProfileStore:
             profile = Profile.model_validate(raw)  # raises on invalid data
             tmp = self.path.with_suffix(".json.tmp")
             tmp.write_text(json.dumps(raw, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            tmp.chmod(0o600)
             tmp.replace(self.path)
             self._profile, self._mtime = profile, self.path.stat().st_mtime
             return profile

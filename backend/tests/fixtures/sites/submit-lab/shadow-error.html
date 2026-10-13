@@ -1,0 +1,14 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Apply</title></head><body>
+<h1>Apply for Frontend Engineer</h1>
+<form id="app"><label for="nm">Full name *</label><input id="nm" name="name" required>
+<privacy-consent></privacy-consent><button type="submit">Submit application</button></form>
+<script>
+  customElements.define('privacy-consent', class extends HTMLElement {
+    connectedCallback() {
+      const root = this.attachShadow({ mode: 'open' });
+      root.innerHTML = '<label><input type="checkbox" id="c"> I have read the privacy notice</label><div id="e"></div>';
+    }
+    refuse() { this.shadowRoot.getElementById('e').innerHTML = '<p class="error-message" role="alert">Please fill in this field.</p>'; }
+  });
+  document.getElementById('app').addEventListener('submit', (e) => { e.preventDefault(); document.querySelector('privacy-consent').refuse(); });
+</script></body></html>
