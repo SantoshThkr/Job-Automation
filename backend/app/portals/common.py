@@ -65,6 +65,37 @@ async def extract_cards(page: Page, card_selectors: list[str], fields: dict[str,
         return []
 
 
+_LD_DATES_JS = r"""() => {
+  const out = {};
+  for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
+    const t = s.textContent || '';
+    if (!/JobPosting/i.test(t)) continue;  // only the job's own structured data, never a widget's
+    for (const k of ['datePosted', 'validThrough']) {
+      // (a regex literal: in a string, '\s' would be a plain 's' - and pretty-printed JSON, "datePosted": "...", missed)
+      const m = t.match(k === 'datePosted' ? /"datePosted"\s*:\s*"([^"]{8,40})"/ : /"validThrough"\s*:\s*"([^"]{8,40})"/);
+      if (m && !out[k]) out[k] = m[1];
+    }
+  }
+  return out;
+}"""
+
+
+async def read_page_dates(page: Page, job) -> None:
+    """The portal's own posting date and end date from the job page's structured data (schema.org JobPosting), when
+    it has them - the reliable evidence (Naukri's "3+ weeks ago" was, on one page, 2026-06-25)."""
+    from app.matching.posting import parse_date
+    from app.matching.posting import utcnow as now_utc
+
+    try:
+        found = await page.evaluate(_LD_DATES_JS)
+    except Exception:  # noqa: BLE001 - optional evidence
+        return
+    if posted := parse_date(str(found.get("datePosted") or ""), now=now_utc()):
+        job.posted_at, job.posted_date_only = posted.at, posted.date_only
+    if end := parse_date(str(found.get("validThrough") or ""), now=now_utc().replace(year=now_utc().year + 5)):
+        job.valid_through = end.at
+
+
 async def first_text(page: Page, selectors: list[str], *, max_len: int = 20_000) -> str:
     js = r"""
     (sels) => { for (const s of sels) { try { const el = document.querySelector(s);

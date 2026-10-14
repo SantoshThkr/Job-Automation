@@ -18,11 +18,13 @@ class FakeGate:
         self.responses = list(responses or [])
         self.calls: list[tuple[str, str]] = []
         self.payloads: list[dict | None] = []
+        self.detectors: list = []  # how the agent would notice by itself that you are done (None = it cannot)
         self.last_answers: dict[str, str] = {}
 
     async def wait(self, kind, reason, *, page=None, detect_done=None, timeout_s=None, payload=None) -> GateResult:
         self.calls.append((kind, reason))
         self.payloads.append(payload)
+        self.detectors.append(detect_done)
         self.last_answers = {}
         if not self.responses:
             return GateResult.TIMEOUT

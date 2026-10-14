@@ -25,17 +25,22 @@ from app.browser.selectors import T
 from app.engine.context import ApplyContext, GateResult, SubmitDecision
 from app.engine.submission import SubmissionWatcher, confirmation_since, page_state
 from app.portals.base import PortalAdapter, SearchQuery
+from app.matching.posting import listing_closed
 from app.portals.common import (
     EXPIRED_TEXT,
     all_texts,
     extract_cards,
     first_text,
     generic_apply_button,
+    read_page_dates,
     slugify,
 )
 from app.portals.types import ApplyOutcome, ApplyResult, JobPosting
 
 log = logging.getLogger(__name__)
+
+# the job's own "Posted: 5 days ago" (with the colon) - widgets on the same page say "Posted 30+ days ago"
+_POSTED_STAT = re.compile(r"\bPosted:\s*([^\n|]{2,40}?\bago\b|just now|today|few hours ago)", re.I)
 
 # ------------------------------------------------------------------ selectors
 
@@ -140,6 +145,15 @@ class NaukriAdapter(PortalAdapter):
             raise LoginRequired(self.name, "Naukri session expired (redirected to login)")
 
     # ------------------------------------------------------------ search
+    @staticmethod
+    def job_age(days: int | None) -> int | None:
+        """Naukri's "freshness" filter only knows 1, 3, 7, 15 and 30 days - any other value (the profile's 2) was
+        silently ignored, and three weeks old and older jobs were listed. The smallest one that covers ``days``;
+        none beyond 30 (every posting is then checked on its own date)."""
+        if not days:
+            return None
+        return next((d for d in (1, 3, 7, 15, 30) if d >= days), None)
+
     def search_url(self, q: SearchQuery, page_no: int) -> str:
         slug = slugify(q.keywords) or "jobs"
         loc = slugify(q.location) if q.location else ""
@@ -149,8 +163,8 @@ class NaukriAdapter(PortalAdapter):
             params["l"] = q.location.lower()
         if q.experience_years is not None:
             params["experience"] = int(q.experience_years)
-        if q.posted_within_days:
-            params["jobAge"] = q.posted_within_days
+        if (age := self.job_age(q.posted_within_days)) is not None:
+            params["jobAge"] = age
         return f"{self.base_url}/{path}?{urlencode(params)}"
 
     async def search(self, query: SearchQuery) -> AsyncIterator[JobPosting]:  # type: ignore[override]
@@ -225,6 +239,12 @@ class NaukriAdapter(PortalAdapter):
         body = await self.engine.body_text(limit=6000)
         if EXPIRED_TEXT.search(body):
             job.extra["expired"] = True
+        await read_page_dates(page, job)  # (JSON-LD: "3+ weeks ago" was 2026-06-25 on one page)
+        if job.posted_at is None and (stat := _POSTED_STAT.search(body)):
+            job.posted_text = stat.group(1).strip()  # the job's own "Posted: 5 days ago", not a widget's "Posted 30+ days ago"
+        closed = listing_closed(job)
+        if closed:
+            job.extra["expired"], job.extra["expired_reason"] = True, f"Closed - {closed}"
         job.details_loaded = True
         return job
 

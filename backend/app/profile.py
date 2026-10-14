@@ -160,7 +160,7 @@ class SearchConfig(_Model):
     max_jobs_per_query: int = 50
     max_applications_per_run: int = 15
     max_applications_per_day: int = 40
-    posted_within_days: int = 7
+    posted_within_days: int = 7  # no longer read - the dashboard's job-recency window decides (older profiles still load)
     linkedin_easy_apply_only: bool = False
     delay_between_applications_s: list[int] = Field(default_factory=lambda: [15, 40])
     use_experience_filter: bool = True

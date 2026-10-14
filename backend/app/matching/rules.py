@@ -45,6 +45,7 @@ class MatchResult:
     analysis: dict[str, Any] = field(default_factory=dict)
     ai: dict[str, Any] | None = None
     resume_id: str | None = None
+    profile_rev: str = ""  # the preferences this decision was made with (see preferences_rev)
     ai_focus: bool = False  # frontend + AI (LLM / RAG / agents) role
     resume_category: str = "frontend"  # frontend | fullstack | ai: which resume flavour fits
     priority: str = ""  # human-readable preference note (React/Next.js first, Angular lower, ...)
@@ -141,6 +142,22 @@ def _score_ratio(profile: Profile, a: JobAnalysis, ctx: _Ctx) -> float:
     else:
         score = ratio / max(min_ratio - 0.2, 0.01) * 40
     ctx.reasons.append(f"Frontend focus ≈ {pct}% (your minimum {round(min_ratio * 100)}%)")
+    if a.title_category in {"generic", "other", "fullstack"} and ratio < min_ratio - 0.2:
+        # far below your minimum, measured from the description: not a role to decide about, a role to leave out
+        # ("Senior NONMEM Programmer", "Forward Deployed Engineer", "Full Stack Engineer" with a backend description)
+        kind = "Backend-heavy full-stack role" if a.title_category == "fullstack" else "Not a frontend role"
+        ctx.blockers.append(f"{kind}: about {pct}% of the description is frontend work (your minimum is "
+                            f"{round(min_ratio * 100)}%)")
+    if a.title_category in _OTHER_FAMILIES:
+        # "Java or Kotlin & React.js Developer", "Node Js Developer", "QA Engineer (React)": the title names another
+        # kind of role and merely mentions a frontend technology. Its score alone never applies (61.5 against a
+        # threshold of 60 had queued the first): below your minimum it is left out, above it the decision is yours.
+        if ratio < min_ratio:
+            ctx.blockers.append(f"Title names a {a.title_category} role and about {pct}% of the description is "
+                                f"frontend work (your minimum is {round(min_ratio * 100)}%)")
+        else:
+            ctx.flags.append(f"Title names a {a.title_category} role, although the description is mostly frontend "
+                             f"work (≈ {pct}%)")
     if a.title_category == "fullstack" and ratio < min_ratio:
         ctx.flags.append(f"Full-stack role is backend-heavy (frontend ≈ {pct}%)")
     if a.title_category in {"generic", "other"} and ratio < min_ratio:
@@ -210,6 +227,8 @@ def _score_experience(profile: Profile, a: JobAnalysis, ctx: _Ctx) -> float:
         return 70.0
     lo = lo or 0.0
     req = f"{lo:g}-{hi:g}" if hi is not None else f"{lo:g}+"
+    if a.experience_note and not a.experience_conflict:
+        ctx.reasons.append(a.experience_note)
     if years < lo:
         gap = lo - years
         if gap > tol:
@@ -220,6 +239,9 @@ def _score_experience(profile: Profile, a: JobAnalysis, ctx: _Ctx) -> float:
     if hi is not None and years > hi:
         over = years - hi
         if hi <= 3 and hi <= years / 2:
+            if a.experience_conflict:  # "Senior ..." with "0-2 Yrs" in the portal's field: yours to judge, not a skip
+                ctx.flags.append(a.experience_note)
+                return 60.0
             ctx.blockers.append(f"Role targets {req} years of experience; you have {years:g}")
             return 10.0
         ctx.reasons.append(f"Experience: requires {req} yrs, you have {years:g} (above range)")
@@ -247,6 +269,10 @@ def _score_seniority(profile: Profile, a: JobAnalysis, ctx: _Ctx) -> float:
     diff = abs(SENIORITY_RANK[job] - SENIORITY_RANK[cand])
     score = {0: 100.0, 1: 80.0, 2: 45.0}.get(diff, 15.0)
     ctx.reasons.append(f"Seniority: {job} role vs your level ({cand})")
+    if job == "junior" and SENIORITY_RANK[cand] >= SENIORITY_RANK["senior"]:
+        # "Junior React Developer" scored 98.6 for a senior engineer (LinkedIn dry run, 2026-10-14): the title, the
+        # description and the skills all fit - the level does not. Yours to decide, never applied to by the score.
+        ctx.flags.append(f"Junior-level role (the title says so); your experience puts you at {cand} level")
     return score
 
 
@@ -316,6 +342,19 @@ def evaluate_rules(profile: Profile, job: JobInput, analysis: JobAnalysis | None
         ctx.blockers.append(f"Salary up to {a.salary_max_lpa:g} LPA is below your minimum {prefs.min_salary_lpa:g} LPA")
     if a.jd_length < 150 and a.title_category != "frontend":
         ctx.flags.append("Very short job description")
+    # Mandatory skills of another platform that you do not list: "Staff Frontend Engineer - Mobile" requires React
+    # Native, Android and iOS; "React GenAI Developer" requires Java, Hibernate and Spring Boot. (Small tools a
+    # description also lists as required - jQuery, Bootstrap, a test runner - are not what this is about.)
+    foreign: dict[str, list[str]] = {}
+    for skill in missing:
+        d = skill_def(skill)
+        if d is not None and d.category == "mobile":
+            foreign.setdefault("mobile", []).append(skill)
+        elif skill in _HEAVY_BACKEND_SKILLS:
+            foreign.setdefault("backend", []).append(skill)
+    for family, skills in foreign.items():
+        if len(skills) >= 2:
+            ctx.flags.append(f"The description requires {', '.join(skills[:4])} ({family}) - not among your skills")
 
     ratio = a.frontend_ratio
     if a.title_category in {"generic", "other"}:
@@ -361,9 +400,12 @@ def evaluate_rules(profile: Profile, job: JobInput, analysis: JobAnalysis | None
     )
 
 
+_OTHER_FAMILIES = {"backend", "mobile", "devops", "data", "qa"}  # title categories that are not yours by themselves
+
 _HEAVY_BACKEND_SKILLS = {"Java", "Spring Boot", "Hibernate", ".NET", "PHP", "Go", "Ruby on Rails", "Scala", "C++"}
 
 _REACT_TITLE = re.compile(r"\breact(?:\.?js)?\b(?![\s-]*native)|next\.?js", re.I)
+_TYPESCRIPT_TITLE = re.compile(r"\btypescript\b", re.I)
 _ANGULAR_TITLE = re.compile(r"\bangular(?:js)?\b", re.I)
 
 
@@ -378,6 +420,9 @@ def _preference(job: JobInput, a: JobAnalysis) -> tuple[float, str, bool]:
     if _REACT_TITLE.search(job.title or ""):
         adjust += 3
         notes.append("React/Next.js role (top priority)")
+    elif _TYPESCRIPT_TITLE.search(job.title or "") and not _ANGULAR_TITLE.search(job.title or ""):
+        adjust += 3
+        notes.append("TypeScript role (top priority)")
     elif _ANGULAR_TITLE.search(job.title or ""):
         adjust -= 5
         notes.append("Angular-focused role (React/Next.js preferred)")
@@ -385,6 +430,43 @@ def _preference(job: JobInput, a: JobAnalysis) -> tuple[float, str, bool]:
         adjust += 3
         notes.append("Frontend + AI role")
     return adjust, "Priority: " + ", ".join(notes) if notes else "", ai_focus
+
+
+def preferences_rev(profile: Profile) -> str:
+    """A short fingerprint of everything in your profile that decides whether a job is relevant. It is stored with
+    every decision, so a job skipped under older preferences can be told apart and looked at again."""
+    import hashlib
+    import json
+
+    wp = profile.work_preferences
+    data = {
+        "job": profile.job_preferences.model_dump(mode="json"),
+        "matching": profile.matching.model_dump(mode="json"),
+        "work": {"locations": sorted(p.strip().lower() for p in wp.preferred_locations), "remote": wp.open_to_remote,
+                 "hybrid": wp.open_to_hybrid, "onsite": wp.open_to_onsite, "relocate": wp.willing_to_relocate},
+        "years": profile.professional.total_experience_years,
+        "skills": [sorted(s.lower() for s in profile.skills.primary), sorted(s.lower() for s in profile.skills.secondary)],
+    }
+    return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:12]
+
+
+def skip_reason(result: MatchResult, apply_threshold: float) -> str:
+    """Why a job with hard blockers is skipped, in words that also explain a high score next to it: the score
+    measures the overall fit, a hard requirement overrides it."""
+    why = "; ".join(result.blockers)
+    if result.score >= apply_threshold:
+        why += f" (a hard requirement - skipped although the overall fit is {result.score:g})"
+    return why
+
+
+def decision_reason(result: MatchResult, apply_threshold: float) -> str:
+    """The sentence recorded with a decision: the hard requirement, the low score with its main reasons, or what
+    makes the job yours to decide. Never empty for a skip."""
+    if result.blockers:
+        return skip_reason(result, apply_threshold)
+    if result.decision == Decision.SKIP.value:
+        return f"Low match ({result.score}): " + ("; ".join(result.reasons[:2]) or "little of the role fits your profile")
+    return "; ".join(result.flags) or (result.reasons[0] if result.reasons else "")
 
 
 def title_prescreen(profile: Profile, title: str) -> list[str]:

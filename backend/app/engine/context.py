@@ -74,6 +74,9 @@ class ApplyContext:
     record_answer: Callable[[FormField | None, QuestionContext, Answer], Awaitable[None]] | None = None
     on_submit_attempt: Callable[[], Awaitable[None]] | None = None
     submit_blockers: list[str] = field(default_factory=list)
+    # the last check before the irreversible click: '' or why this job must not be applied to now (its age)
+    recency_check: Callable[[Page | None], Awaitable[str]] | None = None
+    recency_blocked: str = ""
     answers_log: list[tuple[QuestionContext, Answer]] = field(default_factory=list)
     on_step: Callable[[str, str], Awaitable[None]] | None = None  # (description, url) -> dashboard "current step"
     remember: Callable[[str, str], Awaitable[None]] | None = None  # save a user answer for future forms
@@ -197,6 +200,12 @@ class ApplyContext:
         * review:  pause and wait for Approve / Reject from the dashboard (the user may also fix
                    fields or submit by hand in the open browser window).
         """
+        if self.recency_check is not None:
+            why = await self.recency_check(page)
+            if why:
+                self.recency_blocked = why
+                await self.event("recency", f"Not submitting: {why}", level="warning")
+                return SubmitDecision.DRY_RUN if self.mode == AgentMode.DRY_RUN else SubmitDecision.MANUAL
         if self.mode == AgentMode.DRY_RUN:
             await self.event("dry_run", "Dry run: stopped before submitting"
                              + (f" ({len(unresolved)} question(s) would need review)" if unresolved else ""),

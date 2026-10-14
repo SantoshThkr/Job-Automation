@@ -1,0 +1,14 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Candidate sign in - Epsilon Systems</title></head><body>
+<!-- An employer site with its own e-mail / password sign-in, followed by a verification code (two-step sign-in). -->
+<main><h1>Sign in to your candidate account</h1>
+<form id="f"><label for="u">Email address</label><input id="u" type="email" name="email">
+<label for="p">Password</label><input id="p" type="password" name="password">
+<button type="submit">Sign in</button></form><p id="err" class="error" hidden></p></main>
+<script>
+document.getElementById('f').addEventListener('submit', (e) => { e.preventDefault();
+  localStorage.setItem('eps_signins', String(Number(localStorage.getItem('eps_signins') || 0) + 1));
+  if (document.getElementById('u').value === localStorage.getItem('eps_account') &&
+      document.getElementById('p').value === localStorage.getItem('eps_password')) { location.href = 'mfa-otp.html'; return; }
+  const err = document.getElementById('err'); err.hidden = false; err.textContent = 'Invalid email or password';
+});
+</script></body></html>

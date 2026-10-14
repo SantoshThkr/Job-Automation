@@ -1310,7 +1310,8 @@ _LOCATION_OK = re.compile(r"(?:ok(?:ay)?|fine|comfortable|willing|open|happy|abl
 def h_location_ok(ctx, p, q):
     """'Are you okay with the office location, Pune?' / 'Locations: Bangalore, Pune, Noida' (Yes / No): yes when one
     of the cities is where you live or prefer to work, else your willingness to relocate."""
-    if not _wants_yes_no(ctx):
+    if not (_wants_yes_no(ctx) or (ctx.field_type in {"text", "textarea"} and not ctx.options
+                                   and _YES_NO_QUESTION.search(q))):  # "Are you open for Mumbai location?" in a text box
         return None
     cities = [c for c in parse_locations(q) if c not in {"remote", "anywhere"}]
     if not cities:
@@ -1345,8 +1346,9 @@ def h_open(ctx, p, q):
 # like "Phone number" - never to longer questions such as "Years of mobile development?"
 RULES: list[tuple[str, Handler, bool]] = [
     (r"country\s+code|phone\s+code|dial(?:l?ing)?\s+code|calling\s+code", h_country_code, False),
-    (r"\bfirst\s*name\b|\bgiven\s+name\b|\bfname\b", _personal("first_name", "first"), True),
-    (r"\blast\s*name\b|\bsurname\b|\bfamily\s+name\b|\blname\b", _personal("last_name", "last"), True),
+    # (bare "First" / "Last": the sub-labels of a two-box name field - Gravity Forms, Zoho, many WordPress forms)
+    (r"\bfirst\s*name\b|\bgiven\s+name\b|\bfname\b|^first$", _personal("first_name", "first"), True),
+    (r"\blast\s*name\b|\bsurname\b|\bfamily\s+name\b|\blname\b|^last$", _personal("last_name", "last"), True),
     (r"^(?:your\s+)?(?:full\s+|legal\s+|candidate'?s?\s+)?name$|^full\s+name|^legal\s+name", h_full_name, True),
     (r"\be-?mail\b", _personal("email", "email"), True),
     (r"\b(?:tele)?phone\b|\bmobile\b|contact\s+(?:number|no)|\bcell\b|whatsapp", h_phone, True),
@@ -1363,6 +1365,9 @@ RULES: list[tuple[str, Handler, bool]] = [
     (r"(?:annual|yearly|total)\s+(?:\w+\s+)?compensation\s+range|compensation\s+range|salary\s+range|"
      r"expected\s+(?:annual\s+|yearly\s+|base\s+|total\s+|overall\s+|gross\s+|fixed\s+)*(?:ctc|salary|compensation|package|pay|remuneration)|expected\s+annual|salary\s+expectation|"
      r"desired\s+(?:annual\s+|yearly\s+|base\s+|total\s+|overall\s+|gross\s+)*(?:salary|compensation|pay|ctc)|\bectc\b|(?:compensation|pay)\s+expectation|expected\s+fixed", h_salary("expected"), False),
+    # (after the "expected ..." wordings above: a CTC that is not called expected is the one you have now)
+    (r"^(?:what(?:'s|\s+is)\s+)?(?:your\s+)?(?:annual\s+|total\s+)?ctc\b(?!\s*(?:expect|hike|offered|range|budget|for\s+this|of\s+this))"
+     r"[^?]{0,30}\??$", h_salary("current"), False),
     (r"salary\s+currency|currency", h_salary_currency, True),
     (r"notice\s+period|how\s+soon\s+can\s+you\s+join|joining\s+(?:time|date)|earliest\s+(?:start|joining|possible)|when\s+can\s+you\s+(?:start|join)|available\s+to\s+(?:start|join)|join\s+immediately|start\s+date|serving\s+notice|"
      r"^date\s+available|available\s+(?:from|date)\b|availability\s+date|date\s+of\s+(?:joining|availability)|"
@@ -1409,7 +1414,9 @@ RULES: list[tuple[str, Handler, bool]] = [
     (r"\b(?:night|rotational|rotating|evening|us|uk|est|pst|cst|emea|apac|24\s*[x*/]\s*7)\s+shifts?\b|\bshifts?\s+(?:timings?|work|hours|basis)|"
      r"work(?:ing)?\s+in\s+(?:\w+\s+)?shifts?\b|"
      r"(?:comfortable|willing|open|able|ok(?:ay)?|ready|flexible)\s+(?:\w+\s+){0,6}?shifts?\b(?!\s+(?:to|from|base|your|my)\b)|"
-     r"us[\s-]based\s+hours|\b(?:us|uk|est|pst|cst|edt|pdt)\s+(?:business\s+|working\s+)?(?:hours|time\s*zones?|timings?)\b|night\s+hours",
+     r"us[\s-]based\s+hours|\b(?:us|uk|est|pst|cst|edt|pdt)\s+(?:business\s+|working\s+)?(?:hours|time\s*zones?|timings?)\b|night\s+hours|"
+     # "comfortable working in 2 PM - 11 PM shift?" (the times are part of the same preference)
+     r"\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm)\s*(?:-|–|to)\s*\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm)\s+(?:\w+\s+)?shifts?\b",
      _preference("open_to_shifts", "shift work / other time zones"), False),
     (r"(?:willing|open|able|ready|comfortable)\s+(?:to\s+|with\s+)?travel|travel\s+(?:requirements?|required|up\s+to|\d+\s*%)|\d+\s*%\s+(?:of\s+)?travel",
      _preference("willing_to_travel", "travel"), False),

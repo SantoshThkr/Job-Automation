@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import threading
+from datetime import date, datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -129,6 +130,52 @@ def stop(db: Session = Depends(get_db)) -> dict[str, Any]:
         st.message = "Stopped"
     db.flush()
     return _state(db)
+
+
+class RecencyRequest(Strict):
+    """One of: ``days`` (1, 3, 7, 14, 30, 60, 90), a custom ``start`` / ``end`` date range, or ``all`` (every date -
+    only when chosen explicitly)."""
+    days: Annotated[int, Field(ge=1, le=90)] | None = None
+    start: date | None = None
+    end: date | None = None
+    all: bool = False
+
+
+@router.put("/recency")
+def set_recency(body: RecencyRequest, db: Session = Depends(get_db)) -> dict[str, Any]:
+    from app.matching.posting import CHOICES, local_tz
+
+    chosen = [body.days is not None, body.start is not None or body.end is not None, body.all]
+    if sum(chosen) != 1:
+        raise HTTPException(422, "Choose exactly one: days, a date range (start/end), or all")
+    today = datetime.now(local_tz()).date()
+    if body.days is not None:
+        if body.days not in CHOICES:
+            raise HTTPException(422, f"days must be one of {list(CHOICES)}")
+        stored: dict[str, Any] = {"days": body.days}
+    elif body.all:
+        stored = {"all": True}
+    else:
+        if body.start is None:
+            raise HTTPException(422, "A date range needs a start date")
+        end = body.end or today
+        if body.start > end:
+            raise HTTPException(422, "The start date is after the end date")
+        if end > today or body.start < today - timedelta(days=366):
+            raise HTTPException(422, "The range must lie within the last year and not in the future")
+        stored = {"start": body.start.isoformat(), "end": end.isoformat() if body.end else None}
+    st = AgentState.get(db)
+    st.recency = stored
+    add_event(db, None, "recency", f"Job recency set to: {_label(stored)} (search, queue and the last check before "
+                                   "each application use it from the next run on)")
+    db.flush()
+    return _state(db)
+
+
+def _label(stored: dict) -> str:
+    from app.matching.posting import window_from
+
+    return window_from(stored).label()
 
 
 class ModeRequest(Strict):

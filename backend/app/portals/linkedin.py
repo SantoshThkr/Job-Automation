@@ -22,7 +22,7 @@ from app.engine.context import ApplyContext, GateResult, SubmitDecision
 from app.engine.questions import ask_and_fill
 from app.engine.submission import SubmissionState, SubmissionWatcher
 from app.portals.base import PortalAdapter, SearchQuery
-from app.portals.common import extract_cards, first_text
+from app.portals.common import extract_cards, first_text, read_page_dates
 from app.portals.linkedin_session import LinkedInSession, LinkedInState, LoginCheck, classify_page
 from app.portals.types import ApplyOutcome, ApplyResult, JobPosting
 
@@ -70,8 +70,11 @@ DETAIL_JS = r"""(root) => {
     while (box.parentElement && box !== scope && T(box).length < T(heads[0]).length + 200) box = box.parentElement;
     jd = T(box).replace(/^\s*about\s+the\s+job\s*/i, '');
   }
-  const parts = document.title.replace(/^\(\d+\+?\)\s*/, '').split(' | ').map(x => x.trim());  // "(3) Title | Co | LinkedIn"
-  return {jd: jd.slice(0, 20000), title: parts.length >= 3 ? parts[0] : '', company: parts.length >= 3 ? parts[1] : ''};
+  // "(3) Title | Co | LinkedIn" - the company is the part before "LinkedIn": a title may contain " | " itself
+  // ("Software Engineer (Remote | $50-$100/hr)"), and reading the second part made the pay its company
+  const parts = document.title.replace(/^\(\d+\+?\)\s*/, '').split(' | ').map(x => x.trim());
+  const n = parts.length;
+  return {jd: jd.slice(0, 20000), title: n >= 3 ? parts.slice(0, n - 2).join(' | ') : '', company: n >= 3 ? parts[n - 2] : ''};
 }"""
 
 APPLY_BTN = T("linkedin apply", css=["button.jobs-apply-button", ".jobs-apply-button--top-card button",
@@ -86,7 +89,9 @@ APPLIED_STATE = T("linkedin applied", css=[".artdeco-inline-feedback--success", 
                   within_text=["/^\\s*Applied\\s+\\d+\\s+(?:second|minute|hour|day|week|month)s?\\s+ago/i",
                                "/^\\s*Application submitted\\s*$/i"])
 APPLIED_TEXT = T("linkedin applied text", within_text=list(APPLIED_STATE.within_text))  # job page after submitting
-NO_LONGER = T("closed", within_text=["No longer accepting applications"])
+# (LinkedIn says "Not currently accepting applications" on a paused posting: no Apply button, nothing to do there)
+NO_LONGER = T("closed", within_text=["No longer accepting applications", "Not currently accepting applications",
+                                     "/^\\s*This job is no longer available/i"])
 
 # 2026 Easy Apply: a native <dialog open data-testid="dialog" aria-labelledby="dialog-header"> (no role attribute)
 MODAL = T("easy apply modal", css=[".jobs-easy-apply-modal", "div[data-test-modal][role='dialog']",
@@ -117,6 +122,18 @@ CONFIRMATION_JS = r"""() => {
       const lines = (b.innerText || '').split('\n').map(x => x.trim()).filter(Boolean);
       return lines.find(x => /your application was sent/i.test(x)) || lines.find(x => rx.test(x)) || m[0];
     }
+  }
+  return '';
+}"""
+# The posting's age in the job's top card ("India · 15 hours ago · Over 100 applicants", "Reposted 2 days ago"): the
+# first short line of the page that has the "·" separators and an "ago" (job lists further down have neither form)
+_TOP_CARD_AGE_JS = r"""() => {
+  const rx = /((?:Reposted\s+)?\d+\+?\s*(?:minute|hour|day|week|month|year)s?\s+ago)/i;
+  for (const el of document.querySelectorAll('main p, main span, main div, .jobs-unified-top-card, .job-details-jobs-unified-top-card__primary-description-container')) {
+    const t = (el.innerText || '').trim();
+    if (!t || t.length > 160 || !t.includes('·')) continue;
+    const m = t.match(rx);
+    if (m) return m[1];
   }
   return '';
 }"""
@@ -261,12 +278,19 @@ class LinkedInAdapter(PortalAdapter):
             job.description = await first_text(page, DETAIL_JD) or job.description
         if not job.description:  # any other layout: the 'About the job' section by its heading
             await self._read_new_layout(job)
+        try:  # the top card's "United States · 3 hours ago · 88 applicants" (lower widgets say "Posted 1 week ago")
+            job.posted_text = (await page.evaluate(_TOP_CARD_AGE_JS)) or job.posted_text
+        except PlaywrightError:
+            pass
+        await read_page_dates(page, job)
         key, btn = await self.engine.wait_for_any({"applied": APPLIED_STATE, "apply": APPLY_BTN, "closed": NO_LONGER},
                                                   timeout_ms=5000)
         if key == "applied":
             job.already_applied = True
         elif key == "closed":
             job.extra["expired"] = True
+            job.extra["expired_reason"] = ((await self.engine.text_of(NO_LONGER)) or "").strip().splitlines()[0][:160] \
+                if btn is not None else ""
         elif key == "apply" and btn is not None:
             label = ((await btn.get_attribute("aria-label")) or "") + " " + (await btn.inner_text())
             job.easy_apply = "easy apply" in label.lower()
@@ -301,7 +325,8 @@ class LinkedInAdapter(PortalAdapter):
         if key == "applied":
             return ApplyResult(ApplyOutcome.ALREADY_APPLIED, "LinkedIn shows this job as applied")
         if key == "closed":
-            return ApplyResult(ApplyOutcome.EXPIRED, "LinkedIn: no longer accepting applications")
+            said = ((await self.engine.text_of(NO_LONGER)) or "no longer accepting applications").strip().splitlines()[0]
+            return ApplyResult(ApplyOutcome.EXPIRED, f"LinkedIn: {said[:120]}")
         if btn is None:
             return ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED, "Apply button not found",
                                screenshot=await self.engine.screenshot(f"linkedin-noapply-{job.external_id}"))
@@ -400,7 +425,7 @@ class LinkedInAdapter(PortalAdapter):
             await self._discard(page)
             return ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED, "Unknown Easy Apply step", unresolved=all_unresolved)
         await ctx.event("handoff", "Unfamiliar Easy Apply step: the navigator continues in the dialog", level="warning")
-        res = await navigate_application(self.engine, page, ctx, ats_name="linkedin-easy-apply")
+        res = await navigate_application(self.engine, page, ctx, ats_name="linkedin-easy-apply", dialog_only=True)
         if res.outcome != ApplyOutcome.APPLIED and not res.submit_attempted:
             await self._discard(page)  # never leave a half-filled Easy Apply draft behind
         res.unresolved = list(dict.fromkeys([*all_unresolved, *res.unresolved]))

@@ -261,6 +261,37 @@ _SECRET_SHAPES = re.compile(
     r"|(\b(?:password|passwd|secret|token|api[_-]?key|li_at|jsessionid|session[_-]?id)\s*[=:]\s*)[^\s,;&'\"]+")
 
 
+# secrets learnt while running (a sign-in read from the Keychain): redacted like the configured ones from then on
+_RUNTIME_SECRETS: set[str] = set()
+
+
+def register_secret(value: str) -> None:
+    """From now on ``value`` is removed from every log line, recorded event and saved page."""
+    if value and len(value) >= 4:
+        _RUNTIME_SECRETS.add(value)
+
+
+def scrub_secrets(text: str) -> str:
+    """``text`` without any configured or registered secret."""
+    from app.config import get_settings
+
+    for secret in sorted({*_RUNTIME_SECRETS, *get_settings().secret_values}, key=len, reverse=True):
+        if len(secret) >= 4 and secret in text:
+            text = text.replace(secret, "[redacted]")
+    return text
+
+
+_PASSWORD_INPUT = re.compile(r"<input\b[^>]*\btype\s*=\s*[\"']?password\b[^>]*>", re.I)
+_VALUE_ATTR = re.compile(r"""\svalue\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)""", re.I)
+
+
+def scrub_html(html: str) -> str:
+    """A page's source as it may be saved: password boxes carry no value (frameworks mirror what was typed into the
+    ``value`` attribute), and no configured or registered secret appears anywhere in it."""
+    html = _PASSWORD_INPUT.sub(lambda m: _VALUE_ATTR.sub(' value="[redacted]"', m.group(0)), html)
+    return scrub_secrets(html)
+
+
 class RedactingFilter(logging.Filter):
     """Keep credentials out of log files: the configured secrets by value, and anything shaped like a credential
     assignment (password=..., Authorization: Bearer ..., li_at=...)."""
@@ -270,7 +301,7 @@ class RedactingFilter(logging.Filter):
         self.secrets = sorted({s for s in (secrets or []) if len(s) >= 4}, key=len, reverse=True)
 
     def scrub(self, text: str) -> str:
-        for secret in self.secrets:
+        for secret in [*self.secrets, *sorted(_RUNTIME_SECRETS, key=len, reverse=True)]:
             if secret in text:
                 text = text.replace(secret, "[redacted]")
         return _SECRET_SHAPES.sub(lambda m: (m.group(1) or m.group(2)) + "[redacted]", text)

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Try the whole system safely against LOCAL MOCK portals (Naukri/LinkedIn/Instahyre/ATS copies),
 # with a fake candidate profile and an isolated database. Nothing is sent to real websites.
-# Stop `make dev` first (the demo uses ports 8000, 3000 and 8765).
+# Stop `make dev` first (the demo uses ports 8010, 3000 and 8765).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 DEMO="${TMPDIR:-/tmp}/pja-demo"
@@ -26,7 +26,8 @@ export PJA_BROWSER_HEADLESS="${HEADLESS:-false}"
 
 (cd backend && exec .venv/bin/python -m tests.mock_server --port 8765) &
 MOCK=$!
-(cd backend && exec .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-server-header) &
+export PJA_BACKEND_URL=http://127.0.0.1:8010  # the dashboard talks to the demo API, nothing else
+(cd backend && exec .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8010 --no-server-header) &
 API=$!
 (cd frontend && exec npm run dev) &
 WEB=$!

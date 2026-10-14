@@ -132,3 +132,24 @@ export function safeHref(url: string | null | undefined): string | undefined {
     return undefined;
   }
 }
+
+/** The "last N days" choices of the job-recency window, as the dashboard names them. */
+export function recencyOption(days: number): string {
+  return days === 1 ? "Last 24 hours" : `Last ${days} days`;
+}
+
+/** A day as an <input type="date"> value ("2026-10-14"), `offsetDays` from `from` (today in this time zone). */
+export function localDay(offsetDays = 0, from?: string): string {
+  const d = from ? new Date(`${from}T12:00:00`) : new Date();
+  d.setDate(d.getDate() + offsetDays);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** A job's posting age for a table cell: "today", "1 day ago", "21+ days ago" (an open-ended label), "" unknown. */
+export function postedAge(days: number | null | undefined, openEnded = false): string {
+  if (days == null) return "";
+  const whole = Math.floor(days);
+  if (whole < 1) return "today";
+  return `${whole}${openEnded ? "+" : ""} day${whole === 1 && !openEnded ? "" : "s"} ago`;
+}

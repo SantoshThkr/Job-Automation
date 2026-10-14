@@ -10,7 +10,7 @@ unknown question), and records everything in a local dashboard.
 Everything runs on your Mac: FastAPI + SQLite + Playwright + Next.js + Ollama (`qwen3:4b`).
 
 ```
-             Dashboard (Next.js, :3000)  ⇄  FastAPI (:8000)  ⇄  SQLite (jobs, applications, answers, runs, live state)
+             Dashboard (Next.js, :3000)  ⇄  FastAPI (:8010)  ⇄  SQLite (jobs, applications, answers, runs, live state)
                                                    │ start / pause / resume / stop, answers, approvals
                                           Agent process (python -m app.agent)
                                                    │
@@ -54,7 +54,7 @@ make login-naukri          # once per portal; the session is saved in data/brows
 make login-linkedin
 make login-instahyre
 
-make dev                   # API http://127.0.0.1:8000 + dashboard http://localhost:3000
+make dev                   # API http://127.0.0.1:8010 + dashboard http://localhost:3000
 ```
 
 Open **http://localhost:3000**, choose **Dry Run**, press **Start**. When the results look right,
@@ -76,6 +76,22 @@ make try URL="https://careers.example.com/jobs/123" MODE=review  # asks you in t
    borderline). Java/.NET/PHP full-stack roles are skipped unless the description is genuinely frontend-heavy;
    React + Python/Node is accepted; React/Next.js titles get a priority boost, Angular-only a small penalty;
    frontend + AI (LLM/RAG/agents) roles are recognised. Unclear jobs go to *Needs you → Should I apply?*.
+   A score alone never applies: a hard requirement (years, location, an excluded keyword, a description that is
+   measurably not frontend work - under your minimum by 20 points or more) skips the job whatever its score, and
+   the recorded reason says so ("... a hard requirement - skipped although the overall fit is 85"). A title that
+   names another role family ("Node.js Developer", "Java or Kotlin & React.js Developer") is never applied to on
+   its score: below your frontend minimum it is skipped, above it the decision is yours - as for a junior-level
+   title when you are senior, and for a description that requires two or more core skills of another platform
+   you do not list (React Native / Android / iOS, Java / Spring / .NET ...). The local
+   model may settle what the rules could not read (an unclear title, a thin description); it cannot turn a job
+   the rules *measured* as backend-heavy or mismatched into "apply".
+   The experience asked for is read from the portal's field first; a junior range there ("0-2 Yrs") is not
+   believed when the description asks for clearly more (the description is used) or when only the title says
+   Senior (the job waits for your decision). Years that describe the employer ("10+ years of industry presence")
+   and the end of a range ("7 - 10 years") are not read as a higher requirement.
+   **When you change your preferences**, recent jobs that were skipped for a hard requirement under the old ones
+   are evaluated again at the start of the next run (rules only, nothing is opened): still blocked → stay
+   skipped; now relevant → queued; borderline → *Needs decision*. Jobs you skipped yourself are never revisited.
 5. **Apply, best match first**, within the run/day limits. The resume is chosen per job
    (frontend / frontend+AI / full-stack). The portal flow is used where the portal is the application
    (Naukri chatbot, LinkedIn Easy Apply, Instahyre); anything else continues on the company's site.
@@ -83,6 +99,43 @@ make try URL="https://careers.example.com/jobs/123" MODE=review  # asks you in t
    confirmation text appeared *after* the submit click.
 
 Duplicates (same posting, or same company + title already applied elsewhere) are never applied twice.
+
+### Job recency (which posting dates are applied to)
+
+Chosen on the dashboard (*Job recency*: last 24 hours, 3, 7, 14, 30, 60 or 90 days, a custom date range, or *All
+dates* - only when you pick it; **the last 7 days until you choose**). The choice is saved by the API, so it survives
+refreshes and applies to every run. It replaces `profile.json → search.posted_within_days`, which is no longer read.
+
+* **What counts as the posting date**: the portal's own date on the job page (schema.org `datePosted`), else the
+  listing's relative label ("2 hours ago", "3+ weeks ago") counted from the moment it was read. Never when the
+  assistant found, imported or last updated the job. A label with "+" is a lower bound ("3+ weeks ago" = at least
+  21 days, possibly months). Portals round labels down, so a label is precise only to its unit ("1 week ago" = 7 to
+  13 days, "2 days ago" = 48 to 71 hours): a job whose possible dates straddle the window's edge counts as unknown. A date without a time is a calendar day in this machine's time zone ("the last 7 days" =
+  today and the 7 days before it); ambiguous dates ("05/06/2026") and dates in the future are not believed.
+* **Where it is applied**: the portal's own "posted within" search filter (where one exists), every listing before it
+  is evaluated (too old → `SKIPPED` with the date, not even opened for matching), the queue right before each
+  application (a job queued weeks ago is checked again), re-evaluation (`make reevaluate`), and the last check
+  inside the submit decision - where the date on the open job page wins over the recorded one (the job's timeline
+  shows what that check found: "Last check before submitting: posted on ..."). A listing past its own end date
+  (`validThrough`) is `EXPIRED` whatever its age.
+* **Unknown dates**: never applied to automatically - in Auto Apply the job waits for your decision (*Needs
+  decision*); in Review Mode you see it before anything is sent.
+* **Changing the window during a run**: narrowing applies at once (queue and last check use the stricter of the
+  run's window and the current one); widening applies from the next run, which also looks again (rules only) at jobs
+  skipped only for their age.
+
+Portal limits:
+
+| Portal | Search filter | Posting date read from |
+|---|---|---|
+| Naukri | `jobAge` - only 1, 3, 7, 15, 30 days (the smallest that covers your window; none beyond 30) | the job page's `datePosted` when present, else "Posted: N days ago" on the page or the listing's label. Naukri's label stops at "3+ weeks ago" / "30+ days ago" (a lower bound). |
+| LinkedIn | `f_TPR` (any number of days) | the relative age on the job's top card ("2 days ago", "Reposted 1 week ago"); no structured date on most pages |
+| Instahyre | none (all openings are listed) | the job page's `datePosted` (present on the pages checked); the listing itself shows no date, so jobs found before 2026-10-14 stay undated until they are read again |
+| Company sites (ATS) | - | the listing on the portal that linked to it; the final check also reads the company page's own `datePosted` / `validThrough` when it has them |
+
+A listing that could not be read (its page timed out) or that its portal had paused ("Not currently accepting
+applications") is not set aside for good: when a later search lists it again it is read again, at most once in
+twelve hours.
 
 ## 3. The navigator (company sites and unknown application systems)
 
@@ -107,9 +160,27 @@ application dialog, unknown submit buttons) goes through the mode gate (Dry Run 
 Known systems (Greenhouse, Lever, Workday, SmartRecruiters) use their specialised adapter first; if it gets
 structurally stuck, the navigator continues from the same page.
 
-**Employer accounts** (Workday, SuccessFactors, Taleo, iCIMS, Oracle…): set `PJA_ATS_ACCOUNT_PASSWORD` in `.env`
-and the agent signs in with your profile email, or creates an account when a site requires one (never in
-Dry Run). Email verification codes/links always come to you. Without the password it asks you to sign in.
+**Signing in on employer sites** (Workday, SuccessFactors, Taleo, iCIMS, Oracle, a company's own careers
+login…). A guest path is always preferred. Otherwise, in this order:
+
+1. **A sign-in you stored for that site** - kept in the macOS Keychain, used on that site and its sub-domains
+   only, and only to *sign in* (never to register). Store one with
+   `make site-login SITE=careers.example.com` (or `python -m app.cli site-login set careers.example.com --user
+   you@example.com`): macOS asks for the password in its own prompt - it is never an argument, never printed,
+   never logged. `make site-logins` lists the sites (names only); `site-login check <site>` / `delete <site>`.
+2. **The general job-site password** `PJA_ATS_ACCOUNT_PASSWORD` in `.env`, with your profile e-mail: signs in,
+   or creates an account when a site requires one (never in Dry Run; `PJA_ATS_CREATE_ACCOUNTS=false` forbids it).
+3. **"Sign in with Google" / "Continue with Google"**, when the site offers it and no password applies (or the
+   stored one was refused): the assistant clicks the site's button, which opens Google's own page - and waits
+   there for you. It types nothing on Google's page; choosing the account, your password, 2-step verification
+   and consent are yours. When you are done the same application continues by itself. A Google session this
+   browser profile already has is reused by Google as usual (`make login-google` signs you in once, ahead of
+   time, in the agent's own browser). `PJA_GOOGLE_SIGNIN=false` leaves such buttons alone. Google decides whether
+   it accepts a sign-in from this browser; if it refuses, use a stored sign-in or sign in on the site by hand.
+4. Otherwise it asks you to sign in in the agent's browser window and continues when you press **Continue**.
+
+Verification codes (OTP, e-mail links, 2-step sign-in) and CAPTCHAs always wait for you; a password is never
+typed into another service's sign-in page or into a login box framed in from another site.
 
 ## 4. Modes
 
@@ -181,7 +252,8 @@ Try it: `cd backend && .venv/bin/python -m app.cli answer "Why should we hire yo
 |---|---|
 | A required question that cannot be answered truthfully from your profile (see section 5) | The dashboard shows the question (with options); answer it there → it is filled in, the application continues, and the answer is **saved and reused** on every future form. |
 | CAPTCHA / "verify you are human" / OTP | Never bypassed. Notification + banner; solve it in the agent's browser and press **Continue**. Inline "I'm not a robot" boxes are left for you right before submitting. |
-| Company site requires sign-in / account | Signs in / creates the account if `PJA_ATS_ACCOUNT_PASSWORD` is set, otherwise asks you. Email verification always asks you. |
+| Company site requires sign-in / account | Signs in with the sign-in you stored for the site (Keychain) or the general `PJA_ATS_ACCOUNT_PASSWORD`; opens the site's "Sign in with Google" and waits for you there; otherwise asks you. Verification codes always ask you. |
+| A portal session expires during a run | Its queued jobs stay queued (the one being applied to goes back to the queue unless something may already have been sent); the run says once to log in again (`make login-<portal>`). Nothing is skipped or parked for it. |
 | Applications by email only | Marked *Needs you* with the address to send your resume to. |
 | The Apply button does nothing / page not understood | It tries once, asks the local AI, then asks you to move it one step forward; it continues from there. |
 | Parked company-site application | **Retry** continues on the page where it stopped instead of restarting. Answering its pending questions in *Needs you* re-queues it automatically. |
@@ -242,10 +314,13 @@ Optional fields left empty are simply asked about (once) when a form requires th
 | `PJA_NAVIGATOR_MAX_STEPS` / `PJA_NAVIGATOR_MAX_MINUTES` | `45` / `15` | per-application budget |
 | `PJA_ATS_ACCOUNT_PASSWORD` | empty | password for employer career-site accounts (use one only for job sites) |
 | `PJA_ATS_CREATE_ACCOUNTS` | `true` | allow creating those accounts (never in Dry Run) |
+| `PJA_RECONSIDER_SKIPPED` | `true` | at the start of a run, look again at recent jobs skipped under older preferences (`python -m app.cli reevaluate --skipped --dry` previews it) |
+| `PJA_SITE_LOGIN_KEYCHAIN` | `true` | look up sign-ins stored per site in the macOS Keychain (`make site-login SITE=...`) before the general password |
+| `PJA_GOOGLE_SIGNIN` | `true` | open a career site's "Sign in with Google" and wait for you on Google's page (the assistant types nothing there) |
 | `PJA_BROWSER_HEADLESS` | `false` | keep visible so you can help with CAPTCHA/OTP/sign-in |
 | `PJA_BROWSER_CHANNEL` | empty | `chrome` to drive your installed Google Chrome |
 | `PJA_REVIEW_WAIT_TIMEOUT_S` / `PJA_LOGIN_WAIT_TIMEOUT_S` | `900` / `600` | review / login waits |
-| `PJA_API_HOST` / `PJA_API_PORT` | `127.0.0.1` / `8000` | where the API listens - keep it on loopback |
+| `PJA_API_HOST` / `PJA_API_PORT` | `127.0.0.1` / `8010` | where the API listens - keep it on loopback. The dashboard reads the same port (`make dev` passes it on). 8010 rather than the common 8000: when another program answers on the API's port, `make check` says so, and the dashboard refuses to talk to anything there that does not answer as the Job Assistant API. |
 | `PJA_ALLOWED_HOSTS` | `localhost,127.0.0.1,::1,host.docker.internal` | host names the API answers to |
 | `PJA_API_TOKEN` | empty | shared secret dashboard ⇄ API; **required** when `PJA_API_HOST` is not loopback |
 | `PJA_API_DOCS` | `false` | `/docs` and `/openapi.json` (development only) |
@@ -259,12 +334,18 @@ Search, matching and limits live in `profile.json → search / matching / job_pr
 ## 9. Dashboard
 
 * **Dashboard**: jobs found, relevant, applications, skipped, failed, *needs your attention*, queued,
-  today/this week; Start / Pause / Resume / Stop; mode and portals; the **Now** panel (current job, phase,
+  today/this week; Start / Pause / Resume / Stop; mode, portals and **Job recency**; the **Now** panel (current job, phase,
   current application step, page); live activity; recent applications; run history.
 * **Needs you**: live questions to answer, approvals, *Should I apply?* decisions, parked jobs (Open / Retry /
-  Mark applied / Skip).
-* **Jobs**: every job with status, score, decision, resume, filters (incl. *Closed / expired*).
-* **Job detail**: description, match explanation, resume used, every question and answer (with source),
+  Mark applied / Skip). A job stopped only by questions that are yours to decide - a preference, a legal or
+  pay-related statement - is labelled **Needs decision**; one that lacks a fact (a date, years with a tool) or
+  waits on a CAPTCHA / sign-in stays **Needs you**.
+* **Jobs**: every job with status, score, decision, resume, filters (incl. *Closed / expired*). Skipped, failed
+  and waiting jobs show their reason in the row. The list follows the job-recency window (jobs posted within it, or
+  with an unknown date); *Show older jobs too* lists every posting date without changing what is applied to. The
+  *Posted* column shows the posting date and its age, flagged *Too old*, *Closed* or *Unsure*.
+* **Job detail**: when the job was posted (and from which evidence), why it is not applied to when it is outside
+  the window, description, match explanation, resume used, every question and answer (with source),
   step-by-step timeline with screenshots, failure reason, where a parked application will continue.
 * **Settings**: profile check, resumes, saved answers.
 
@@ -273,8 +354,17 @@ Search, matching and limits live in `profile.json → search / matching / job_pr
 ```bash
 make dev                                   # API + dashboard
 make agent MODE=dry_run PORTALS=naukri     # agent in the foreground (dry_run | review | auto)
+                                           #   a controlled run (from backend/):  .venv/bin/python -m app.agent --mode auto --portals naukri \
+                                           #     --jobs 1201,1305        exactly these queued jobs: no search, nothing else from the queue
+                                           #     --max-searches 3        search only the first 3 query/location pairs of each portal
+                                           #     --max-applications 5    stop after 5 application attempts
+                                           #     --search-only           find and evaluate new listings only: the queue is not touched
 make try URL="https://…" [MODE=review]     # navigator on one job page, prompts in the terminal
-make reevaluate                            # re-score pending jobs after changing preferences (--ai via the CLI)
+make reevaluate                            # re-score pending jobs after changing preferences or the job-recency window (--ai via the CLI)
+                                           #   (python -m app.cli reevaluate --skipped --dry: skipped jobs your new preferences would let through;
+                                           #    --list FILE writes every proposed change - job, status, reason, posting date - as a TSV)
+make site-login SITE=careers.example.com   # store the sign-in for one employer site in the macOS Keychain (macOS asks for the password)
+make site-logins                           # which sites have a stored sign-in (names only)
 make test                                  # full test suite (headless browser + local mock sites)
 make test-fast                             # unit tests only
 make test-web                              # dashboard tests (Vitest) + typecheck
@@ -288,7 +378,7 @@ cd backend && .venv/bin/python -m app.cli answer "What is your notice period?"
 
 ## 11. Tests
 
-`make test` runs 998 backend tests (last run: 998 passed; ~42 min in one session - never run two sessions at once, and never beside a real run) and `make test-web` 28 dashboard tests: the unit suite, the security suite and the browser suite (headless Chromium against local mock portals,
+`make test` runs 1335 backend tests (last run, 2026-10-14: 1335 passed; ~47 min in one session - never run two sessions at once, and never beside a real run) and `make test-web` 63 dashboard tests: the unit suite, the security suite and the browser suite (headless Chromium against local mock portals,
 ATS pages and 16 mock company career sites reproducing real-world situations: cookie banners, multi-step
 SPA forms, guest-vs-sign-in, login walls, account creation with email verification, popups, iframe
 forms, inline CAPTCHA, closed/unavailable jobs, already-applied pages, email-only applications,
@@ -365,7 +455,9 @@ sure only *you, on this machine* can reach it, and that your data never leaves i
 * The agent's browser profile (`data/browser-profile`) holds your logged-in portal sessions: treat `data/` like
   a password store. Data files are created with owner-only permissions (0600 / 0700).
 * Secrets (`PJA_ATS_ACCOUNT_PASSWORD`, `PJA_API_TOKEN`) live only in `.env`, are redacted from logs and are never
-  returned by the API.
+  returned by the API. Sign-ins for single sites live in the macOS Keychain, not in any file of this project;
+  a password read from it is removed from log lines, recorded events and saved page captures from the moment it
+  is read (saved pages never carry the value of a password box at all).
 
 **Not covered** - anything running under your own macOS account can read these files (use FileVault for disk
 encryption at rest); the database itself is not encrypted; there is no multi-user access control.

@@ -130,6 +130,13 @@ async def test_job_page_details_from_the_new_layout(li, site_server):
 
 
 @pytestmark_browser
+async def test_a_title_with_a_bar_in_it_keeps_its_company(li):
+    """'Software Engineer (Remote | $245–$280/hr) | Acme Labs | LinkedIn': the pay was read as the company."""
+    job = await li.fetch_details(_posting(li.base_url, "4465524751"))
+    assert job.title == "Software Engineer (Remote | $245–$280/hr)" and job.company == "Acme Labs"
+
+
+@pytestmark_browser
 async def test_description_text_is_not_a_confirmation(li, engine):
     await engine.goto(_posting(li.base_url).url)
     assert "your application was sent" in (await engine.page.inner_text("main")).lower()
@@ -285,3 +292,32 @@ async def test_job_236_end_to_end_status_only_applied_after_confirmation(site_se
             assert wa.answer == "Citizen" and wa.source == "memory"
     finally:
         await engine.stop()
+
+
+# ------------------------------------------------------------------ a posting that is not taking applications
+
+@pytestmark_browser
+async def test_a_paused_posting_is_closed_not_parked_on_you(li, engine, profile):
+    """"Not currently accepting applications" (eleven jobs up to 2026-10-13): there is no Apply button because
+    there is nothing to apply to. That is a closed posting - with LinkedIn's own words - not "Apply button not
+    found" waiting in your list."""
+    posting = _posting(li.base_url, "4465524750")
+    job = await li.fetch_details(posting)
+    assert job.extra.get("expired") is True and job.title.startswith("UI Engineer")
+    ctx = make_ctx(engine, profile, posting, AgentMode.AUTO, FakeGate())
+    res = await li.apply(posting, ctx)
+    assert res.outcome == ApplyOutcome.EXPIRED and res.message == "LinkedIn: Not currently accepting applications"
+    assert not ctx.submits and not ctx.gate.calls
+
+
+@pytestmark_browser
+async def test_the_same_words_inside_a_job_description_do_not_close_an_open_posting(li, engine):
+    """An open posting whose description says "... not currently accepting applications from agencies": its Apply
+    button is what counts (the adapter looks for the applied state and the button before the closed note)."""
+    from app.portals.linkedin import APPLIED_STATE, APPLY_BTN, NO_LONGER
+
+    await engine.goto(_posting(li.base_url, "4465524749").url)
+    await engine.page.evaluate("() => { document.querySelector('._jd_7 p').textContent += "
+                               "' We are not currently accepting applications from agencies.'; }")
+    key, _ = await engine.wait_for_any({"applied": APPLIED_STATE, "apply": APPLY_BTN, "closed": NO_LONGER}, timeout_ms=4000)
+    assert key == "apply"

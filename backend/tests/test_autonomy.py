@@ -578,3 +578,61 @@ async def test_the_terms_of_a_contract_are_not_the_contract_preference(profile):
         assert not (answered(a) and a.value in {"Yes", "No"} and "open_to_contract" in (a.note or "")), question
     w2 = await engine.answer(q("Are you willing to work on W2? Strictly NO C2C candidates with an Employer.", "radio", ["Yes", "No"]))
     assert not answered(w2)  # a tax / legal arrangement: yours to answer
+
+
+# ------------------------------------------------------------------ stops of 2026-10-13 the profile could answer
+
+@pytest.mark.parametrize("short,full", [
+    ("What is your CTC (in INR LPA)?", "What is your current CTC (in INR LPA)?"),  # LinkedIn
+    ("CTC", "Current CTC"), ("What is your CTC?", "What is your current CTC?"),
+])
+async def test_a_ctc_that_is_not_called_expected_is_your_current_one(engine, short, full):
+    a, b = await engine.answer(q(short, "number")), await engine.answer(q(full, "number"))
+    assert answered(b) and answered(a) and a.value == b.value, (short, a.note)
+
+
+@pytest.mark.parametrize("question", ["Expected CTC", "ECTC", "CTC expectation", "What CTC range are you looking for?",
+                                      "Are you fine with the CTC offered?", "Happy with CTC specified in Job description?"])
+async def test_other_ctc_questions_are_not_answered_with_your_current_ctc(engine, question):
+    current = (await engine.answer(q("Current CTC", "number"))).value
+    a = await engine.answer(q(question, "number"))
+    assert not (answered(a) and a.value == current and "ctc" in question.lower() and "expect" not in question.lower()
+                and "ectc" not in question.lower()), (question, a.note)
+
+
+async def test_whether_an_offered_ctc_suits_you_is_your_decision(engine):
+    for question in ("Happy with CTC specified in Job description?", "Are you fine with the CTC offered?"):
+        assert not answered(await engine.answer(q(question, "radio", ["Yes", "No"]))), question
+
+
+async def test_open_for_a_city_is_answered_in_a_text_box_too(profile):
+    """LinkedIn: "Are you open for Mumbai location?" as free text was asked although the city is in your preferences."""
+    p = profile.model_copy(deep=True)
+    p.work_preferences.preferred_locations = [*p.work_preferences.preferred_locations, "Mumbai"]
+    engine = Answerer(p, None, min_confidence=0.75)
+    for ftype, options in (("text", []), ("radio", ["Yes", "No"])):
+        a = await engine.answer(q("Are you open for Mumbai location?", ftype, options))
+        assert answered(a) and a.value == "Yes", (ftype, a.note)
+    away = await Answerer(profile, None, min_confidence=0.75).answer(q("Are you open for Kolkata location?"))
+    assert answered(away) and away.value == "No"  # not preferred, and the test profile does not relocate
+    plain = await engine.answer(q("Location"))  # a label, not a question: your city, never "Yes"
+    assert not (answered(plain) and plain.value in {"Yes", "No"})
+
+
+async def test_a_shift_given_by_its_hours_follows_the_shift_preference(profile):
+    question = q("Are you comfortable working in 2 PM - 11 PM shift?", "radio", ["Yes", "No"])
+    ask = await Answerer(profile, None, min_confidence=0.75).answer(question)
+    assert not answered(ask) and "work_preferences.open_to_shifts" in ask.note  # says exactly what is missing
+    p = profile.model_copy(deep=True)
+    p.work_preferences.open_to_shifts = True
+    a = await Answerer(p, None, min_confidence=0.75).answer(question)
+    assert answered(a) and a.value == "Yes"
+
+
+async def test_bare_first_and_last_are_the_two_halves_of_your_name(engine, profile):
+    first, last = await engine.answer(q("First")), await engine.answer(q("Last"))
+    assert answered(first) and first.value == profile.personal.first_name
+    assert answered(last) and last.value == profile.personal.last_name
+    for other in ("Last company", "Last working day", "First preference"):
+        a = await engine.answer(q(other))
+        assert not (answered(a) and a.value in {profile.personal.first_name, profile.personal.last_name}), other

@@ -9,15 +9,15 @@ import { usePoll } from "@/lib/hooks";
 import { MODE_LABEL, fmtDate, timeAgo } from "@/lib/format";
 
 const STAT_CARDS: { key: string; label: string; href: string }[] = [
-  { key: "jobs_discovered", label: "Jobs discovered", href: "/jobs" },
-  { key: "relevant_jobs", label: "Relevant jobs", href: "/jobs?decision=APPLY" },
-  { key: "applications", label: "Applications", href: "/jobs?status=APPLIED" },
-  { key: "skipped", label: "Skipped", href: "/jobs?status=SKIPPED,DUPLICATE" },
-  { key: "failed", label: "Failed", href: "/jobs?status=FAILED" },
+  { key: "jobs_discovered", label: "Jobs discovered", href: "/jobs?posted=any" },
+  { key: "relevant_jobs", label: "Relevant jobs", href: "/jobs?decision=APPLY&posted=any" },
+  { key: "applications", label: "Applications", href: "/jobs?status=APPLIED&posted=any" },
+  { key: "skipped", label: "Skipped", href: "/jobs?status=SKIPPED,DUPLICATE&posted=any" },
+  { key: "failed", label: "Failed", href: "/jobs?status=FAILED&posted=any" },
   { key: "manual_action_required", label: "Needs your attention", href: "/review" },
-  { key: "queued", label: "Queued to apply", href: "/jobs?status=QUEUED&sort=score" },
-  { key: "today_applications", label: "Applied today", href: "/jobs?status=APPLIED" },
-  { key: "weekly_applications", label: "Applied this week", href: "/jobs?status=APPLIED" },
+  { key: "queued", label: "Queued to apply", href: "/jobs?status=QUEUED&sort=score&posted=any" },
+  { key: "today_applications", label: "Applied today", href: "/jobs?status=APPLIED&posted=any" },
+  { key: "weekly_applications", label: "Applied this week", href: "/jobs?status=APPLIED&posted=any" },
 ];
 
 const RUN_PARTS: [string, string][] = [
@@ -87,7 +87,7 @@ export default function DashboardPage() {
           <div className="card">
             <div className="spread" style={{ marginBottom: 10 }}>
               <h2 style={{ margin: 0 }}>Recent applications</h2>
-              <Link href="/jobs?applications_only=true" className="small">All →</Link>
+              <Link href="/jobs?applications_only=true&posted=any" className="small">All →</Link>
             </div>
             <JobTable jobs={recent.data?.items ?? []} compact />
           </div>

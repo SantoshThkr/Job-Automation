@@ -112,3 +112,41 @@ async def test_scanner_never_records_the_dom_default_as_a_choice(site_server, tm
     assert groups["Preferred shift"] == ["day", "night"]  # an explicit value attribute still stands in
     assert groups["Open to relocation?"] == ["Yes", "No"]
     assert choice_labels(groups["Are you comfortable working from the office?"]) == []
+
+
+# ------------------------------------------------------------------ "Needs decision" versus "Needs you"
+
+def test_a_stop_on_questions_only_you_can_decide_is_a_decision(api):
+    """Stops of 2026-10-13: a drug test, an equity-only role, US work authorisation, a contract role. Nothing is
+    missing from the profile there - a decision is. Facts that are merely missing (a date of birth, years with a
+    tool) stay "questions"; one fact among decisions keeps the item a question stop."""
+    decide, app_d = _waiting_job("9101", company="DecideCo")
+    facts, app_f = _waiting_job("9102", company="FactCo")
+    mixed, app_m = _waiting_job("9103", company="MixedCo")
+    _ask(app_d, "Are you willing to take a drug test, in accordance with local law/regulations?", options=["Yes", "No"])
+    _ask(app_d, "This Position is contract role for 3 months are you looking for contract role ?", options=["Yes", "No"])
+    _ask(app_d, "Happy with CTC specified in Job description?", options=["Yes", "No"])
+    _ask(app_f, "Date of Birth", "date")
+    _ask(app_f, "How many years of work experience do you have with ServiceNow?", "number")
+    _ask(app_m, "Are you comfortable working in 2 PM - 11 PM shift?", options=["Yes", "No"])
+    _ask(app_m, "How many REST APIs have you developed?", "number")
+
+    data = api.get("/api/needs-you").json()
+    by_job = {i["job_id"]: i for i in data["items"]}
+    assert by_job[decide]["stop_kind"] == "decision" and "only you can decide" in by_job[decide]["why"]
+    assert all(q["decision"] for q in by_job[decide]["questions"])
+    assert by_job[facts]["stop_kind"] == "questions" and not any(q["decision"] for q in by_job[facts]["questions"])
+    assert by_job[mixed]["stop_kind"] == "questions"
+    assert [q["decision"] for q in sorted(by_job[mixed]["questions"], key=lambda q: q["id"])] == [True, False]
+    assert all(i["status"] == JobStatus.MANUAL_ACTION_REQUIRED for i in data["items"])  # no new status was invented
+
+
+@pytest.mark.parametrize("question,decision", [
+    ("Are you willing to relocate to Pune?", True), ("Do you agree to a background verification?", True),
+    ("Will you now or in the future require sponsorship?", True), ("Can you join within 15 days?", True),
+    ("Current company", False), ("PAN number", False), ("How many years of experience do you have with Go?", False),
+])
+def test_what_counts_as_a_decision(question, decision):
+    from app.engine.needs_you import is_decision
+
+    assert is_decision(question) is decision

@@ -10,7 +10,7 @@ import logging
 
 from app.ai.job_assistant import AIResponseError, AIUnavailable, JobAssistant
 from app.matching.analyzer import JobInput, analyze_job
-from app.matching.rules import MatchResult, evaluate_rules
+from app.matching.rules import MatchResult, evaluate_rules, preferences_rev
 from app.models import Decision
 from app.profile import Profile
 from app.resumes import select_resume
@@ -22,6 +22,11 @@ AI_MIN_CONFIDENCE = 0.6
 AI_DECISIVE_CONFIDENCE = 0.75
 
 
+# flags that say "the rules could not tell" - the only ones the model's reading of the description may settle
+AI_MAY_RESOLVE = ("Unclear role title", "Few recognizable skills", "Very short job description",
+                  "No clear frontend/backend signal")
+
+
 class JobMatcher:
     def __init__(self, profile: Profile, assistant: JobAssistant | None = None) -> None:
         self.profile = profile
@@ -29,6 +34,7 @@ class JobMatcher:
 
     def evaluate_rules_only(self, job: JobInput) -> MatchResult:
         result = evaluate_rules(self.profile, job, analyze_job(job))
+        result.profile_rev = preferences_rev(self.profile)
         self._attach_resume(result)
         return result
 
@@ -50,6 +56,7 @@ class JobMatcher:
             result.ai = {"used": False, "reason": "AI disabled for matching"}
         if result.ai is None:
             result.ai = {"used": False, "reason": "rules were decisive"}
+        result.profile_rev = preferences_rev(self.profile)
         self._attach_resume(result)
         return result
 
@@ -67,6 +74,7 @@ class JobMatcher:
 
         info = {"used": True, **u.model_dump()}
         result.ai = info
+        rules_ratio = result.frontend_ratio  # what the description itself shows, before the model's opinion
         if u.confidence < AI_MIN_CONFIDENCE:
             info["effect"] = "ignored (low confidence)"
             return
@@ -92,10 +100,18 @@ class JobMatcher:
             elif result.score < m.apply_threshold - 5:
                 result.decision = Decision.MANUAL_REVIEW.value
         elif before == Decision.MANUAL_REVIEW:
-            only_soft = all(not f.startswith("Framework mismatch") for f in result.flags)
-            if decisive and u.recommendation == "APPLY" and u.is_frontend_role and only_soft \
+            # The model may settle what the rules could not read (an unclear title, a thin description). It may not
+            # overrule what they measured: on 2026-10-13 it had called 145 flagged jobs "frontend, apply" - 54 of
+            # them with less than half the description about frontend work ("Forward Deployed Engineer", 15%;
+            # "Full Stack Engineer", backend-heavy at 22%) - and they were applied to or parked on questions about
+            # distributed systems and full-stack years.
+            readable = all(f.startswith(AI_MAY_RESOLVE) for f in result.flags)
+            frontend_enough = rules_ratio is not None and rules_ratio >= self.profile.job_preferences.min_frontend_ratio
+            if decisive and u.recommendation == "APPLY" and u.is_frontend_role and readable and frontend_enough \
                     and result.score >= m.apply_threshold - 5:
                 result.decision = Decision.APPLY.value
+            elif decisive and u.recommendation == "APPLY" and not (readable and frontend_enough):
+                info["note"] = "the model's 'apply' was not followed: the rules measured a reason for your review"
             elif decisive and u.recommendation == "SKIP" and result.score < m.apply_threshold:
                 result.decision = Decision.SKIP.value
         elif before == Decision.SKIP:

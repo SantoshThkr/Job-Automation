@@ -19,9 +19,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import re
 import socket
 from collections import Counter
 from collections.abc import Callable
+from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy import select
@@ -51,7 +54,8 @@ from app.engine.recorder import (
     upsert_job,
 )
 from app.matching.matcher import JobMatcher
-from app.matching.rules import title_prescreen
+from app.matching.posting import Window, listing_closed, posted_of, verdict, window_to_dict
+from app.matching.rules import decision_reason, title_prescreen
 from app.models import (
     ActualState,
     AgentMode,
@@ -76,6 +80,43 @@ _HANDLED = {JobStatus.APPLIED, JobStatus.ALREADY_APPLIED, JobStatus.DUPLICATE, J
             JobStatus.REVIEW_PENDING, JobStatus.MANUAL_ACTION_REQUIRED, JobStatus.DRY_RUN, JobStatus.FAILED,
             JobStatus.AWAITING_APPROVAL, JobStatus.APPLYING, JobStatus.QUEUED, JobStatus.EXPIRED}
 
+# what a portal says about a posting that is paused rather than gone
+_PAUSED = re.compile(r"not\s+currently\s+accepting|temporarily\s+(?:closed|paused|unavailable)|\bpaused\b", re.I)
+ANOTHER_LOOK_AFTER = timedelta(hours=12)
+
+
+TRANSIENT_ATTEMPTS = 3  # how often an application that broke for a passing reason is put back in the queue
+
+
+def transient_failure(exc: BaseException) -> str:
+    """What broke the attempt, when it was something that passes ('' otherwise)."""
+    if is_network_error(exc):
+        return "the internet connection dropped"
+    name, text = exc.__class__.__name__, str(exc)
+    if name in {"TargetClosedError", "BrowserCrashed"} or "has been closed" in text or "Target closed" in text:
+        return "the browser window was closed"
+    return ""
+
+
+def _settings():
+    from app.config import get_settings
+
+    return get_settings()
+
+
+def _worth_another_look(job: Job) -> bool:
+    """Set aside for a reason that may have passed: the listing could not be read (its page timed out while
+    searching) or its portal had paused it ("Not currently accepting applications"). Neither says the job is wrong
+    for you or gone for good - when a later search lists it again it is read again, at most once in twelve hours.
+    Anything that was applied to, decided by you or closed for good is left as it is."""
+    if job.application is not None or job.updated_at is None or utcnow() - job.updated_at < ANOTHER_LOOK_AFTER:
+        return False
+    reason = job.status_reason or ""
+    if job.status == JobStatus.FAILED:
+        return reason.startswith("Error:")  # recorded while reading the listing (never an application's failure)
+    return job.status == JobStatus.EXPIRED and bool(_PAUSED.search(reason))
+
+
 _NETWORK_ERRORS = ("ERR_NAME_NOT_RESOLVED", "ERR_INTERNET_DISCONNECTED", "ERR_NETWORK_CHANGED",
                    "ERR_CONNECTION_RESET", "ERR_CONNECTION_REFUSED", "ERR_ADDRESS_UNREACHABLE",
                    "ERR_NETWORK_IO_SUSPENDED", "ERR_CONNECTION_TIMED_OUT", "ERR_TIMED_OUT")
@@ -99,6 +140,8 @@ class Orchestrator:
         self.control = control
         self.assistant = assistant
         self.portal_limits: dict[str, str] = {}
+        self.logged_out: dict[str, str] = {}  # portal -> why its session ended in this run (its jobs stay queued)
+        self.broke_this_run: set[int] = set()  # jobs requeued after a passing failure: not tried twice in one run
         self.last_sample = None  # the latest [RESOURCE] sample
         self._memory_state = "ok"
         self.memory_stop = ""  # why applying was stopped for lack of memory ('' = it was not)  # portal -> what it said when it stopped taking applications
@@ -111,6 +154,12 @@ class Orchestrator:
         self.profile: Profile | None = None
         self.network_probe = network_probe or _internet_available
         self.max_applications: int | None = None  # per-run cap (agent --max-applications)
+        # A controlled run (agent --jobs / --max-searches): exactly these queued jobs and nothing else - no search, no
+        # other job of the queue, no reconsidering of skipped ones; or a search limited to its first N result pages.
+        self.only_jobs: set[int] | None = None
+        self.max_searches: int | None = None
+        self.search_only = False  # find and evaluate only: the queue is left as it is (for reviewing a portal's yield)
+        self.window: Window = Window()  # job recency, read from the dashboard's choice at the start of every run
 
     # ------------------------------------------------------------ helpers
     def _event(self, job_id: int | None, type_: str, message: str, *, level: str = "info",
@@ -168,6 +217,8 @@ class Orchestrator:
         self.mode = AgentMode(snap.mode) if snap.mode in {m.value for m in AgentMode} else AgentMode.DRY_RUN
         portals = [p for p in (snap.portals or self.profile.search.portals)]
         self.stats = Counter()
+        self.logged_out = {}  # a new run tries every portal again (you may have logged in meanwhile)
+        self.broke_this_run = set()
         with session_scope() as s:
             run = Run(mode=self.mode.value, portals=portals)
             s.add(run)
@@ -179,13 +230,30 @@ class Orchestrator:
         status, error = "COMPLETED", ""
         try:
             self.recover_interrupted()
+            from app.engine.recency import current_window
+
+            self.window = current_window()
+            self._event(None, "recency", f"Job recency for this run: {self.window.label()} (chosen in the dashboard; "
+                                         "older postings are not applied to)")
+            if self.only_jobs is None:
+                self._release_recency_skips()
+            if self.only_jobs is None and _settings().reconsider_skipped:
+                self._reconsider_skipped()
             await self._report_ai_status()
             if await self._memory_blocked():  # out of memory before anything started: no browser is opened at all
                 portals = []
             else:
                 await self.engine.start()
                 await self._resources("run_start")
-                await self.process_queue(portals, label="left from earlier runs")
+                if self.search_only:
+                    self._event(None, "limit", "Search only: new listings are found and evaluated; nothing in the "
+                                               "queue is applied to or changed in this run")
+                else:
+                    await self.process_queue(portals, label="left from earlier runs" if self.only_jobs is None
+                                             else "chosen for this run")
+            if self.only_jobs is not None:
+                self._event(None, "limit", "This run was limited to the chosen job(s): no search")
+                portals = []
             for portal in portals:
                 await self.control.checkpoint()
                 if await self._memory_blocked():
@@ -224,6 +292,58 @@ class Orchestrator:
                                 current_job_id=None, current_step="", current_url="", phase="idle")
         return {"run_id": self.run_id, "status": status, "error": error, "stats": dict(self.stats)}
 
+    def _session_lost(self, portal: str, reason: str, *, job_id: int | None = None, waiting: int = 0) -> None:
+        """A portal's session ended (expired, or a security check appeared). That says nothing about any job: the
+        one being applied to goes back to the queue - unless something may already have been sent, which stays with
+        you to verify - and the portal's other jobs are left queued for the run that follows your next login. Said
+        once per portal and run, not once per job."""
+        first = portal not in self.logged_out
+        self.logged_out[portal] = reason
+        requeued = False
+        if job_id is not None:
+            with session_scope() as s:
+                job = s.get(Job, job_id)
+                app = job.application if job is not None else None
+                if job is not None and job.status == JobStatus.MANUAL_ACTION_REQUIRED \
+                        and not (app is not None and (app.submit_attempted or app.confirmed)):
+                    if app is not None:
+                        app.manual_action_reason = ""
+                    set_status(s, job, JobStatus.QUEUED, f"Kept in the queue: {reason} - it is applied to after you "
+                                                         f"log in to {portal} again")
+                    add_event(s, job.id, "requeued", f"Back in the queue: {reason} (nothing was sent)", run_id=self.run_id)
+                    self.stats["result_manual_action_required"] -= 1
+                    self.stats["deferred"] += 1
+                    requeued = True
+        if first:
+            self.stats["login_required"] += 1
+            self._event(None, "login_required",
+                        f"{portal}: {reason}. Log in again (make login-{portal}); "
+                        + ("the job that was being applied to is back in the queue and " if requeued else "")
+                        + f"{waiting} more queued job(s) of this portal wait for the next run. Nothing was skipped.",
+                        level="warning")
+
+    def _requeue_transient(self, job_id: int, why: str) -> None:
+        """An attempt broke because the connection dropped or the browser window was closed - nothing about the job.
+        Up to 2026-10-13 thirteen jobs had been recorded as Failed that way and waited for a manual Retry. The job
+        goes back to the queue for a later run instead (the third such attempt is recorded as failed); never when
+        something may already have been sent."""
+        with session_scope() as s:
+            job = s.get(Job, job_id)
+            app = job.application if job is not None else None
+            if job is None or job.status != JobStatus.FAILED or app is None or app.submit_attempted or app.confirmed:
+                return
+            if (app.attempts or 0) >= TRANSIENT_ATTEMPTS:
+                set_status(s, job, JobStatus.FAILED, f"{job.status_reason} (it broke {app.attempts} times because "
+                                                     f"{why}: use Retry when it is stable)"[:1000])
+                return
+            app.failure_reason = ""
+            self.broke_this_run.add(job_id)
+            set_status(s, job, JobStatus.QUEUED, f"Kept in the queue: {why} while applying (attempt {app.attempts} of "
+                                                 f"{TRANSIENT_ATTEMPTS}) - nothing was sent; it is tried again on the next run")
+            add_event(s, job.id, "requeued", f"Back in the queue: {why} (nothing was sent)", run_id=self.run_id)
+            self.stats["result_failed"] -= 1
+            self.stats["deferred"] += 1
+
     def _requeue_unregistered(self, portal: str, why: str) -> None:
         with session_scope() as s:
             for jid in self._unregistered.pop(portal, []):
@@ -236,6 +356,73 @@ class Orchestrator:
                 add_event(s, job.id, "requeued", f"Back in the queue: {portal} {why}", run_id=self.run_id)
                 self.stats["result_manual_action_required"] -= 1
                 self.stats["deferred"] += 1
+
+    def _release_recency_skips(self) -> None:
+        """Jobs skipped only for their age under a narrower window are looked at again when the window is widened."""
+        from app.engine.reconsider import release_recency
+
+        assert self.profile is not None
+        try:
+            moved = release_recency(self.profile, self.window, run_id=self.run_id)
+        except Exception as exc:  # noqa: BLE001 - housekeeping
+            log.warning("Could not look again at jobs skipped for their age: %s", exc)
+            return
+        changed = {k: v for k, v in moved.items() if k != "unchanged" and v}
+        if changed:
+            self._event(None, "reconsidered", f"Your job-recency window is now {self.window.label()}: "
+                        + ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in sorted(changed.items())))
+
+    def _windows(self) -> list[Window]:
+        """The run's window and the one chosen in the dashboard now: narrowing it mid-run applies at once (the
+        strictest decides); widening it applies from the next run, which also looks again at jobs it had skipped."""
+        from app.engine.recency import current_window
+
+        try:
+            chosen = current_window()
+        except Exception:  # noqa: BLE001 - the run's own window still applies
+            return [self.window]
+        return [self.window] if chosen == self.window else [self.window, chosen]
+
+    def _recency_gate(self, s: Any, job: Job) -> bool:
+        """Right before a queued job is applied to: closed by its own end date, or posted outside the window ->
+        it is not applied to, and says why. A posting date nobody knows waits for your decision in Auto Apply.
+        Returns True when the job was set aside."""
+        from app.engine.recency import strictest
+
+        closed = listing_closed(job)
+        state, said, window = ("out", f"Closed: {closed}", self.window) if closed else \
+            strictest(posted_of(job), self._windows())
+        if state == "in" or (state == "unknown" and self.mode != AgentMode.AUTO):
+            return False
+        reason = said[0].upper() + said[1:]
+        if closed:
+            set_status(s, job, JobStatus.EXPIRED, reason)
+        elif state == "out":
+            job.match_details = {**(job.match_details or {}), "recency_skip": window_to_dict(window)}
+            set_status(s, job, JobStatus.SKIPPED, f"Not applied: {reason}")
+            self.stats["too_old"] += 1
+        else:
+            set_status(s, job, JobStatus.REVIEW_PENDING, f"Not applied automatically: {reason}")
+            self.stats["date_unknown"] += 1
+        add_event(s, job.id, "recency", job.status_reason, run_id=self.run_id)
+        return True
+
+    def _reconsider_skipped(self) -> None:
+        """Jobs skipped for a hard requirement under other preferences are evaluated again (rules only, nothing is
+        opened). Never fails a run."""
+        from app.engine.reconsider import reconsider_skipped
+
+        assert self.profile is not None
+        try:
+            moved = reconsider_skipped(self.profile, run_id=self.run_id)
+        except Exception as exc:  # noqa: BLE001 - housekeeping
+            log.warning("Could not reconsider skipped jobs: %s", exc)
+            return
+        changed = {k: v for k, v in moved.items() if k != "unchanged" and v}
+        if changed:
+            self.stats["reconsidered"] = sum(changed.values())
+            self._event(None, "reconsidered", "Your preferences changed since some jobs were skipped: "
+                        + ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in sorted(changed.items())))
 
     async def _report_ai_status(self) -> None:
         """One line in the run log about the local model. When it is enabled but cannot be used, that is a warning
@@ -263,7 +450,8 @@ class Orchestrator:
         """Discover + evaluate everything on one portal, then apply to its relevant jobs, best first."""
         try:
             await self.discover_portal(portal)
-            await self.process_queue([portal])
+            if not self.search_only:
+                await self.process_queue([portal])
         except LoginRequired as exc:
             self.stats["login_required"] += 1
             self._event(None, "login_required", f"{portal}: {exc.reason} - skipped this portal", level="warning")
@@ -313,6 +501,8 @@ class Orchestrator:
             return
         with session_scope() as s:
             queued = s.scalars(select(Job).where(Job.status == JobStatus.QUEUED, Job.portal.in_(portals))).all()
+            if self.only_jobs is not None:
+                queued = [j for j in queued if j.id in self.only_jobs]
             queued = sorted(queued, key=lambda j: (-(j.match_score or 0), j.updated_at or utcnow()))
             items = [(j.id, j.portal, _posting_from_job(j)) for j in queued]
         if not items:
@@ -346,7 +536,15 @@ class Orchestrator:
                 job = s.get(Job, job_id)
                 if job is None or job.status != JobStatus.QUEUED:
                     continue  # handled meanwhile (dashboard skip, duplicate...)
+                if job_id in self.broke_this_run:
+                    self.stats["deferred"] += 1  # it broke a moment ago for a passing reason: the next run tries it
+                    continue
+                if self._recency_gate(s, job):
+                    continue  # (a queued job is never applied to past its window: it was queued days or weeks ago)
                 native = job.apply_type != "external"  # applied on the portal itself (not on a company site)
+                if portal in self.logged_out:
+                    self.stats["deferred"] += 1  # stays queued: the portal wants you to log in again first
+                    continue
                 if portal in self.portal_limits and native:
                     self.stats["deferred"] += 1  # stays queued: the portal is not taking applications right now
                     continue
@@ -363,13 +561,20 @@ class Orchestrator:
                     await adapter.ensure_logged_in(DBHumanGate(self.control))
                     logged_in.add(portal)
                 except LoginRequired as exc:
-                    self._event(None, "login_required", f"{portal}: {exc.reason}", level="warning")
+                    self._session_lost(portal, exc.reason, waiting=sum(1 for _i, p, _p in items[n:] if p == portal))
                     continue
                 except NavigationFailed as exc:
                     if is_network_error(exc) and await self._wait_for_network():
                         continue
                     raise
             result = await self.apply_job(job_id, adapter, posting)
+            if result.transient:
+                self._requeue_transient(job_id, result.transient)
+            if result.login_required:
+                logged_in.discard(portal)
+                self._session_lost(portal, result.login_required, job_id=job_id,
+                                   waiting=sum(1 for _i, p, _p in items[n + 1:] if p == portal))
+                continue
             # A portal that silently stops registering its own Apply clicks (Naukri did this for hours on 2026-10-09:
             # 14 in a row, each parked as "needs you") is not a problem with those jobs: after two in a row the
             # portal's own applications wait for the next run, and both jobs go back to the queue.
@@ -405,14 +610,20 @@ class Orchestrator:
         await adapter.ensure_logged_in(DBHumanGate(self.control))
         search = self.profile.search
         years = self.profile.professional.total_experience_years if search.use_experience_filter else None
+        searches = 0
         for keywords in search.queries:
             for location in (search.locations or [""]):
                 await self.control.checkpoint()
+                if self.max_searches is not None and searches >= self.max_searches:
+                    self._event(None, "limit", f"{adapter.display_name}: search limited to {self.max_searches} "
+                                               "quer" + ("y" if self.max_searches == 1 else "ies") + " for this run")
+                    return
+                searches += 1
                 if await self._memory_blocked():  # a long search must not push an exhausted machine further
                     self._event(None, "limit", f"{adapter.display_name}: search stopped - the Mac is out of memory")
                     return
                 q = SearchQuery(keywords=keywords, location=location, experience_years=years,
-                                posted_within_days=search.posted_within_days, max_pages=search.max_pages_per_query,
+                                posted_within_days=self.window.search_days(), max_pages=search.max_pages_per_query,
                                 max_jobs=search.max_jobs_per_query, easy_apply_only=search.linkedin_easy_apply_only)
                 label = f"{adapter.display_name}: '{keywords}'" + (f" in {location}" if location else "")
                 self.control.activity(f"Searching {label}")
@@ -462,9 +673,14 @@ class Orchestrator:
             job_id = job.id
             if created:
                 self.stats["new_jobs"] += 1
-            if not created and job.status in _HANDLED:
+            if not created and job.status in _HANDLED and not _worth_another_look(job):
                 self.stats["seen_before"] += 1
                 return
+            if not created and job.status in _HANDLED:
+                add_event(s, job.id, "another_look", f"Listed again by {adapter.display_name}: read again (it had "
+                                                     f"been set aside as: {(job.status_reason or job.status)[:160]})",
+                          run_id=self.run_id)
+                self.stats["read_again"] += 1
             if posting.already_applied:
                 if _unfinished_elsewhere(job):
                     self.stats["seen_before"] += 1
@@ -504,20 +720,32 @@ class Orchestrator:
                 self.stats["already_applied"] += 1
                 return
             if posting.extra.get("expired"):
-                set_status(s, job, JobStatus.EXPIRED, "The job is closed / no longer accepting applications")
+                said = str(posting.extra.get("expired_reason") or "").strip()
+                set_status(s, job, JobStatus.EXPIRED, f"{adapter.display_name}: {said[:160]}" if said else
+                           "The job is closed / no longer accepting applications")
                 add_event(s, job.id, "expired", job.status_reason, run_id=self.run_id)
                 self.stats["expired"] += 1
+                return
+            closed = listing_closed(job)
+            age_state, age_said = ("out", "") if closed else verdict(posted_of(job), self.window)
+            if closed:
+                set_status(s, job, JobStatus.EXPIRED, f"Closed: {closed}")
+                add_event(s, job.id, "expired", job.status_reason, run_id=self.run_id)
+                self.stats["expired"] += 1
+                return
+            if age_state == "out":  # too old for your window: not even evaluated (no page time, no model)
+                job.match_details = {**(job.match_details or {}), "recency_skip": window_to_dict(self.window)}
+                set_status(s, job, JobStatus.SKIPPED, age_said[0].upper() + age_said[1:])
+                add_event(s, job.id, "recency", job.status_reason, run_id=self.run_id)
+                self.stats["too_old"] += 1
                 return
         self.control.live(step=f"Evaluating fit: {posting.title} @ {posting.company}")
         matcher = JobMatcher(self.profile, self.assistant)
         result = await matcher.evaluate(posting.to_job_input())
         decision = Decision(result.decision)
-        if result.blockers:
-            why = "; ".join(result.blockers)
-        elif decision == Decision.SKIP:
-            why = f"Low match ({result.score}): " + "; ".join(result.reasons[:2])
-        else:
-            why = "; ".join(result.flags) or (result.reasons[0] if result.reasons else "")
+        why = decision_reason(result, self.profile.matching.apply_threshold)
+        if age_state == "unknown" and decision == Decision.APPLY:
+            decision, why = Decision.MANUAL_REVIEW, f"Relevant (score {result.score}) - but {age_said}"
         with session_scope() as s:
             job = s.get(Job, job_id)
             assert job is not None
@@ -677,6 +905,7 @@ class Orchestrator:
             mode=self.mode, job=posting, resume_path=resume.absolute_path if resume else None,
             gate=DBHumanGate(self.control, job_id, app_id), log_event=log_event, record_answer=on_answer,
             on_submit_attempt=on_submit, submit_blockers=blockers, on_step=on_step, remember=remember,
+            recency_check=self._final_recency_check(job_id),
         )
         await self.engine.fresh_page()  # application-scoped tab: closed (with its renderer) at the next boundary
         main_page = self.engine.page
@@ -718,13 +947,14 @@ class Orchestrator:
             self._finish_interrupted(job_id, app_id)
             raise
         except LoginRequired as exc:
-            result = ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED, exc.reason)
+            result = ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED, exc.reason, login_required=exc.reason)
         except ManualActionRequired as exc:
             result = ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED, exc.reason)
         except Exception as exc:
             log.exception("Application failed for job %s", job_id)
             shot = await self._safe_capture(f"apply-{job_id}")
-            result = ApplyResult(ApplyOutcome.FAILED, f"{exc.__class__.__name__}: {exc}", screenshot=shot)
+            result = ApplyResult(ApplyOutcome.FAILED, f"{exc.__class__.__name__}: {exc}", screenshot=shot,
+                                 transient=transient_failure(exc))
         finally:
             for p in list(self.engine.context.pages) if self.engine.alive else []:
                 if p is not main_page and not p.is_closed():
@@ -745,8 +975,45 @@ class Orchestrator:
                 and result.submit_attempted and external_page is None and not resume_url):
             result = await self._portal_recheck(job_id, app_id, adapter, posting, result)
         self._finalize(job_id, app_id, result)
+        if ctx.recency_blocked and not result.submit_attempted:
+            with session_scope() as s:  # stopped before the click for its age: a skip with its reason, not "needs you"
+                job = s.get(Job, job_id)
+                if job is not None and job.status in {JobStatus.MANUAL_ACTION_REQUIRED, JobStatus.DRY_RUN}:
+                    job.match_details = {**(job.match_details or {}), "recency_skip": window_to_dict(self.window)}
+                    set_status(s, job, JobStatus.SKIPPED, f"Not applied: {ctx.recency_blocked}")
+                    if job.application is not None:
+                        job.application.manual_action_reason = ""
         await self._resources("after", application=self.stats["apply_attempts"], job=job_id)
         return result
+
+    def _final_recency_check(self, job_id: int):
+        """The check inside the central submit decision: the page's own dates when it shows them, else the recorded
+        ones. Posted outside the window, or closed -> never sent; unknown -> never sent in Auto Apply."""
+        from app.engine.recency import final_check, snapshot
+
+        with session_scope() as s:
+            job = s.get(Job, job_id)
+            record = snapshot(job) if job is not None else None
+
+        async def check(page) -> str:
+            if record is None:
+                return ""
+            return await final_check(record, self._windows(), page, unknown_blocks=self.mode == AgentMode.AUTO,
+                                     on_pass=lambda said: self._event(job_id, "recency_check",
+                                                                      f"Last check before submitting: {said}"),
+                                     on_page_dates=keep_page_dates)
+
+        def keep_page_dates(found) -> None:
+            """The portal's own dates, read on the job page: kept on the record (they beat a listing's label)."""
+            from app.engine.recorder import record_posted
+
+            with session_scope() as s:
+                job = s.get(Job, job_id)
+                if job is not None:
+                    record_posted(job, SimpleNamespace(posted_at=found.posted_at, posted_date_only=found.posted_date_only,
+                                                       valid_through=found.valid_through, posted_text=""))
+
+        return check
 
     async def _portal_recheck(self, job_id: int, app_id: int, adapter: PortalAdapter, posting: JobPosting,
                               result: ApplyResult) -> ApplyResult:

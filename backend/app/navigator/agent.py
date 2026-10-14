@@ -23,6 +23,7 @@ import logging
 import re
 import time
 from collections import Counter, defaultdict
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -34,6 +35,8 @@ from rapidfuzz import fuzz
 from app.browser.engine import BrowserEngine
 from app.browser.forms import FillReport, FormFiller, collect_errors
 from app.config import get_settings
+from app.site_logins import SiteCredential, normalize_site, same_site
+from app.site_logins import lookup as lookup_credential
 from app.engine.context import ApplyContext, GateResult, SubmitDecision
 from app.engine.questions import ask_and_fill
 from app.navigator.classify import (
@@ -144,7 +147,7 @@ _APPLY_ACTION = re.compile(r"\bappl(?:y|ication)\b|(?:submit|send)\s+(?:my\s+|yo
 class ApplicationNavigator:
     def __init__(self, engine: BrowserEngine, ctx: ApplyContext, *, reasoner: PageReasoner | None = None,
                  cta_submits: bool = False, max_steps: int | None = None, max_minutes: float | None = None,
-                 ats_name: str | None = None) -> None:
+                 ats_name: str | None = None, dialog_only: bool = False) -> None:
         s = get_settings()
         self.engine = engine
         self.ctx = ctx
@@ -153,6 +156,10 @@ class ApplicationNavigator:
         self.max_steps = max_steps or s.navigator_max_steps
         self.max_seconds = (max_minutes or s.navigator_max_minutes) * 60
         self.ats_name = ats_name
+        # A hand-off inside a portal's own apply dialog (LinkedIn Easy Apply): only that dialog is the application.
+        # The page behind it belongs to the portal - its "Save", "Follow" and "I'm interested" buttons act on your
+        # account there, and are never touched.
+        self.dialog_only = dialog_only
         self.delegated: set[str] = {ats_name} if ats_name else set()
         self.filler: FormFiller = ctx.form_filler()
         self.history: list[str] = []
@@ -178,6 +185,10 @@ class ApplicationNavigator:
         self.closed_dialogs: set[str] = set()
         self.signin_attempts = 0
         self.signup_attempts = 0
+        self.site_creds: dict[str, SiteCredential | None] = {}  # looked up once per site
+        self.google_started = False  # the site's "Sign in with Google" was opened in this application
+        self.idp_waits = 0  # times you were asked to finish a sign-in on an identity provider's page
+        self.parents: dict[int, Page] = {}  # tab a pop-up was opened from: where the application goes on
         self.steps = 0
         self.human_assisted = False
         self.first_success: str | None = None
@@ -211,6 +222,15 @@ class ApplicationNavigator:
 
     # ================================================================ steps
     async def _step(self, page: Page, snap: Snapshot) -> None:
+        if self.dialog_only:
+            if not snap.dialog_open and not self.submitted:
+                # (run #53, LinkedIn: the dialog was gone at hand-off. On the job page behind it the navigator clicked
+                # "Easy Apply" twice, the local model then chose "I'm interested", and "Save" saved the job.)
+                self.refused = True  # nothing was sent: the job may simply be tried again
+                await self._stop_manual(f"The apply dialog on {site_label(page.url)} closed before the application was "
+                                        "finished - nothing was sent. Retry opens it again")
+            snap.elements = [e for e in snap.elements if e.dialog]
+            snap.fields = [f for f in snap.fields if f.dialog]
         # ---- 1. outcomes visible on the page
         if self.first_success is None:
             self.first_success = snap.success
@@ -238,12 +258,25 @@ class ApplicationNavigator:
         # ---- 2b. somebody else's sign-in page (Google, Microsoft, Apple ...): yours alone - nothing is typed there
         provider = identity_provider(page.url, snap)
         if provider:
+            self.idp_waits += 1
+            if self.idp_waits > 2:  # asked twice, still on the sign-in page: yours to finish, not a loop to stay in
+                await self._stop_manual(f"The {provider} sign-in for {site_label(self.start_url)} was not completed. "
+                                        "Sign in there yourself, then use Retry - the application continues signed in")
             await self.ctx.event("sign_in_page", f"The application leads to a {provider} sign-in page - nothing was "
                                                  "entered there", level="warning", url=page.url)
+
+            async def signed_in() -> bool:  # the sign-in window closed, or the tab left the provider's pages
+                return page.is_closed() or not identity_provider(page.url)
+
             await self._human(page, "account", f"This application needs you to sign in with {provider}. The assistant "
                                                "never types into another service's sign-in page: sign in yourself in "
-                                               "the browser, then press Continue")
+                                               "the browser (account, password, any verification or consent) - the "
+                                               "application continues by itself when you are done", done=signed_in)
             return
+        if self.google_started and self.idp_waits and "google_done" not in self.waited_for:
+            self.waited_for.add("google_done")
+            await self.ctx.event("signed_in", f"Back on {site_label(page.url)} after the Google sign-in: continuing "
+                                              "the application", url=page.url)
 
         # ---- 3. overlays: cookie banners and popups that hide the page
         if await self._handle_overlays(page, snap):
@@ -314,8 +347,10 @@ class ApplicationNavigator:
     async def _stop_manual(self, reason: str) -> None:
         raise Finish(await self._manual(reason))
 
-    async def _human(self, page: Page, kind: str, reason: str) -> None:
-        """Pause for you; continue from the same page afterwards (or park the job when nobody responds)."""
+    async def _human(self, page: Page, kind: str, reason: str, *,
+                     done: Callable[[], Awaitable[bool]] | None = None) -> None:
+        """Pause for you; continue from the same page afterwards (or park the job when nobody responds).
+        ``done``: how the assistant can see for itself that you finished (it then continues without "Continue")."""
         if self.ctx.mode.value == "dry_run":
             await self.ctx.step(f"Dry run: would need you here - {reason}", page.url, kind=kind)
             raise Finish(ApplyResult(ApplyOutcome.DRY_RUN, f"Dry run stopped: {reason}", ats=self._ats(page),
@@ -324,7 +359,7 @@ class ApplicationNavigator:
         before = await self.engine.page_signature(page)
         widget = kind == "captcha" and await self.engine.captcha_widget_present(page)
 
-        async def done() -> bool:
+        async def cleared() -> bool:
             if kind not in {"captcha", "otp"}:
                 return False
             if await self.engine.detect_blockers(page, include_widgets=False):
@@ -333,13 +368,14 @@ class ApplicationNavigator:
             # because no challenge page is in the way (the form would be sent unsolved and refused)
             return await self.engine.captcha_widget_solved(page) if widget else True
 
-        res = await self.ctx.wait_for_human(kind, reason, page=page, detect_done=done if kind in {"captcha", "otp"}
-                                            else None)
+        res = await self.ctx.wait_for_human(kind, reason, page=page,
+                                            detect_done=cleared if kind in {"captcha", "otp"} else done)
         if res in (GateResult.RESOLVED, GateResult.APPROVE, GateResult.SUBMITTED):
             self.history.append(f"you completed: {kind}")
             self.human_assisted = True
             self.visits.clear()  # the page may legitimately look the same afterwards
-            if await self.engine.page_signature(page) == before and kind not in {"captcha", "otp"}:
+            if not page.is_closed() and await self.engine.page_signature(page) == before \
+                    and kind not in {"captcha", "otp"}:
                 await asyncio.sleep(0.5)
             return
         if res == GateResult.REJECT:
@@ -426,6 +462,40 @@ class ApplicationNavigator:
             return False  # an application form that also asks for a password
         return self._looks_like_signup(snap) or not self._has_real_application_fields(snap)
 
+    def _credential(self, address: str) -> SiteCredential | None:
+        """The sign-in the assistant may use on ``address``: the one you stored for that site, else the general
+        job-site password with your profile e-mail (looked up once per site and application)."""
+        key = normalize_site(address)
+        if key not in self.site_creds:
+            self.site_creds[key] = lookup_credential(address, default_username=self.ctx.profile.personal.email) if key else None
+        return self.site_creds[key]
+
+    def _frame_credential(self, page: Page, frame: Frame) -> SiteCredential | None:
+        """What may be typed into a password box of ``frame``: nothing on an identity provider's page, and nothing
+        in a box framed in from another site unless a sign-in is stored for that very site."""
+        url = frame.url if frame.url.startswith("http") else page.url
+        if identity_provider(url):
+            return None
+        cred = self._credential(url)
+        if cred is None or cred.site_specific or same_site(url, page.url):
+            return cred
+        return None
+
+    def _google_button(self, snap: Snapshot) -> Element | None:
+        """The site's own "Sign in with Google" / "Continue with Google" control, if it offers one."""
+        found = [e for e in snap.by_kind(Kind.SSO) if re.search(r"\bgoogle\b", e.label, re.I)]
+        return found[0] if found else None
+
+    async def _sign_in_with_google(self, page: Page, snap: Snapshot, el: Element) -> None:
+        """Open the site's Google sign-in. Google's page is yours: the next step waits there for you (choosing the
+        account, password, 2-step verification, consent) and types nothing. With a Google session this browser
+        profile already has - and a site you approved before - Google sends the tab straight back, signed in."""
+        self.waited_for.add("google")
+        self.google_started = True
+        await self.ctx.event("google_sign_in", f"{site_label(page.url)} offers '{el.label}': opening Google's own "
+                                               "sign-in page (nothing is typed there by the assistant)", url=page.url)
+        await self._click_and_record(page, snap, el, f"Opened '{el.label}' on {site_label(page.url)}")
+
     async def _handle_account(self, page: Page, snap: Snapshot) -> None:
         site = site_label(page.url)
         guest = self._best_button(snap, Kind.GUEST)
@@ -433,13 +503,21 @@ class ApplicationNavigator:
             await self._click_and_record(page, snap, guest, f"Continued without an account ('{guest.label}')")
             return
         settings = get_settings()
-        password = settings.ats_account_password
+        cred = self._credential(page.url)
+        google = self._google_button(snap) if settings.google_signin and "google" not in self.waited_for else None
+        if google is not None and self.ctx.mode.value != "dry_run" and (cred is None or self.signin_attempts >= 1):
+            # no password for this site (or it was not accepted) and the site offers Google: that is your sign-in
+            await self._sign_in_with_google(page, snap, google)
+            return
+        how = (f"store a sign-in for it with `python -m app.cli site-login set {normalize_site(page.url) or site}`, "
+               "or set PJA_ATS_ACCOUNT_PASSWORD")
         signup = self._looks_like_signup(snap)
         if not snap.password_count:
             # a choice page: "Sign in" / "Create account" buttons without a form yet
             target = None
-            if password:
-                target = (self._best_button(snap, Kind.SIGNUP) if self.signin_attempts and self._may_create_account()
+            if cred is not None:
+                target = (self._best_button(snap, Kind.SIGNUP)
+                          if self.signin_attempts and self._may_create_account(cred)
                           else self._best_button(snap, Kind.SIGNIN))
             if target is not None:
                 await self._click_and_record(page, snap, target, f"Opened '{target.label}'")
@@ -447,16 +525,26 @@ class ApplicationNavigator:
             await self._human(page, "account", f"{site} requires you to sign in or create an account. Please do it "
                                                "in the agent's browser window, then press Continue")
             return
-        if not password:
+        if cred is None:
             await self._human(page, "account", f"{site} asks you to sign in or create an account. Please do it in the "
-                                               "agent's browser window (set PJA_ATS_ACCOUNT_PASSWORD to let the "
-                                               "assistant do this), then press Continue")
+                                               f"agent's browser window, then press Continue (to let the assistant "
+                                               f"sign in here next time: {how})")
             return
         if signup:
+            if cred.site_specific:
+                # the sign-in you stored is for an account that exists: it is never used to register a new one
+                signin = self._best_button(snap, Kind.SIGNIN)
+                if signin is not None and signin.id not in self.tried[snap.signature]:
+                    await self._click_and_record(page, snap, signin, f"Opened '{signin.label}' (a sign-in is stored for {site})")
+                    return
+                await self._human(page, "account", f"{site} shows a registration form, and the sign-in stored for it is "
+                                                   "for an existing account. Please sign in (or register) in the "
+                                                   "agent's browser, then press Continue")
+                return
             if self.ctx.mode.value == "dry_run":
                 raise Finish(ApplyResult(ApplyOutcome.DRY_RUN, f"Dry run: {site} needs a new account (not created in "
                                                                "Dry Run)", ats=self._ats(page), external_url=page.url))
-            if not self._may_create_account() or self.signup_attempts >= 2:
+            if not self._may_create_account(cred) or self.signup_attempts >= 2:
                 await self._human(page, "account", f"Please create the account on {site}, then press Continue")
                 return
             if ACCOUNT_EXISTS_TEXT.search(snap.text) and self.signup_attempts:
@@ -476,17 +564,24 @@ class ApplicationNavigator:
             return
         # sign in
         if self.signin_attempts >= 1:
-            if LOGIN_ERROR_TEXT.search(snap.text) and self._may_create_account() and self.signup_attempts == 0:
+            if LOGIN_ERROR_TEXT.search(snap.text) and self._may_create_account(cred) and self.signup_attempts == 0:
                 link = self._best_button(snap, Kind.SIGNUP)
                 if link is not None and self.ctx.mode.value != "dry_run":
                     await self._click_and_record(page, snap, link, f"No account yet: opening '{link.label}'")
                     return
             if self.signin_attempts >= 2 or LOGIN_ERROR_TEXT.search(snap.text):
-                await self._human(page, "account", f"Signing in to {site} did not work. Please sign in (or create "
-                                                   "the account) in the agent's browser, then press Continue")
+                stored = f"The sign-in stored for {cred.site} was not accepted by {site}" if cred.site_specific else \
+                    f"Signing in to {site} did not work"
+                await self._human(page, "account", f"{stored}. Please sign in (or create the account) in the agent's "
+                                                   "browser, then press Continue")
                 return
         self.signin_attempts += 1
-        await self._fill_credentials(page, snap, signup=False)
+        if not await self._fill_credentials(page, snap, signup=False):
+            await self._human(page, "account", f"Please sign in to {site} in the agent's browser, then press Continue "
+                                               "(the sign-in box belongs to another service: nothing was typed)")
+            return
+        await self.ctx.event("account", f"Signing in to {site} with the "
+                             + (f"sign-in stored for {cred.site}" if cred.site_specific else "general job-site password"))
         btn = self._account_button(snap, signup=False)
         if btn is None:
             try:
@@ -498,8 +593,12 @@ class ApplicationNavigator:
         else:
             await self._click_and_record(page, snap, btn, f"Signing in to {site}")
 
-    def _may_create_account(self) -> bool:
+    def _may_create_account(self, cred: SiteCredential | None = None) -> bool:
+        """Accounts are only ever created with the general job-site password (never with a sign-in stored for an
+        existing account), and only when you allow it."""
         s = get_settings()
+        if cred is not None and cred.site_specific:
+            return False
         return bool(s.ats_account_password and s.ats_create_accounts)
 
     def _looks_like_signup(self, snap: Snapshot) -> bool:
@@ -513,7 +612,11 @@ class ApplicationNavigator:
         return snap.frame(idx) if idx < len(snap.frames) else self.page.main_frame  # type: ignore[union-attr]
 
     async def _fill_passwords(self, frame: Frame) -> int:
+        """A password to choose inside an application form (an account made along the way): the general job-site
+        password only."""
         password = get_settings().ats_account_password
+        if not password or identity_provider(frame.url):
+            return 0
         try:
             boxes = frame.locator("input[type='password']:visible")
             n = await boxes.count()
@@ -524,9 +627,9 @@ class ApplicationNavigator:
         except PlaywrightError:
             return 0
 
-    async def _fill_credentials(self, page: Page, snap: Snapshot, *, signup: bool) -> None:
-        email = self.ctx.profile.personal.email
-        password = get_settings().ats_account_password
+    async def _fill_credentials(self, page: Page, snap: Snapshot, *, signup: bool) -> bool:
+        """Type the user name and password into the sign-in form. False when the only password box belongs to
+        another service (nothing is typed then)."""
         for info in snap.frames:
             frame = info.frame
             try:
@@ -536,23 +639,28 @@ class ApplicationNavigator:
                 continue
             if not n:
                 continue
+            cred = self._frame_credential(page, frame)
+            if cred is None or (signup and cred.site_specific):
+                continue
             for i in range(n):
-                await pw.nth(i).fill(password)
+                await pw.nth(i).fill(cred.password)
             # username / email box
             for f in snap.fields:
                 if f.frame != info.index or f.field.type in {"password", "file", "checkbox", "radio"}:
                     continue
                 blob = f"{f.field.label} {f.field.name} {f.field.placeholder}"
-                if f.field.type == "email" or _EMAIL_FIELD.search(blob):
+                if f.field.type == "email" or _EMAIL_FIELD.search(blob) or (
+                        not signup and re.search(r"user\s*(?:name|id)|login\s*(?:name|id)", blob, re.I)):
                     try:
-                        await frame.locator(f.field.selector).first.fill(email)
+                        await frame.locator(f.field.selector).first.fill(cred.username)
                     except PlaywrightError:
                         pass
             if signup:  # names, phone, terms checkboxes: the regular filler knows how to answer those
                 skip = {f.field.id for f in snap.fields if f.field.type == "password"}
                 report = await self.filler.fill(frame, skip=skip)
                 self._note_unresolved(report)
-            return
+            return True
+        return False
 
     def _account_button(self, snap: Snapshot, *, signup: bool) -> Element | None:
         want = (Kind.SIGNUP, Kind.SUBMIT, Kind.NEXT) if signup else (Kind.SIGNIN, Kind.NEXT, Kind.SUBMIT)
@@ -589,12 +697,10 @@ class ApplicationNavigator:
         frame_idx, skip, in_dialog = self._scope(snap)
         frame = snap.frame(frame_idx)
         if any(f.frame == frame_idx and f.field.type == "password" for f in snap.fields):
-            if not get_settings().ats_account_password:
+            if not await self._fill_passwords(frame):
                 await self._human(page, "account", f"The application form on {site_label(page.url)} asks you to choose "
                                                    "a password. Please fill it in the browser (or set "
                                                    "PJA_ATS_ACCOUNT_PASSWORD), then press Continue")
-            else:
-                await self._fill_passwords(frame)
         n_fields = len([f for f in snap.app_fields if f.frame == frame_idx and f.field.id not in skip])
         await self.ctx.step(f"Filling an application form on {site_label(page.url)} ({n_fields} field(s))", page.url)
         self.filler.page_context = "\n".join(snap.headings[:6]) + "\n" + snap.text[:1200]
@@ -1103,6 +1209,7 @@ class ApplicationNavigator:
             except PlaywrightError:
                 pass
             self.own_pages.append(newest)
+            self.parents[id(newest)] = page
             self.page = newest
             self.engine.use_page(newest)
             self.history.append(f"opened a new tab: {site_label(newest.url)}")
@@ -1134,8 +1241,11 @@ class ApplicationNavigator:
     def _active_page(self) -> Page:
         if self.page is not None and not self.page.is_closed():
             return self.page
+        opener = self.parents.get(id(self.page)) if self.page is not None else None
         alive = [p for p in self.own_pages if not p.is_closed()]
-        if alive:
+        if opener is not None and not opener.is_closed():
+            self.page = opener  # a sign-in pop-up closed itself: the application is where it was opened from
+        elif alive:
             self.page = alive[-1]
         else:
             self.page = self.engine.page
@@ -1162,12 +1272,15 @@ class ApplicationNavigator:
 
 
 async def navigate_application(engine: BrowserEngine, page: Page, ctx: ApplyContext, *, use_ai: bool | None = None,
-                               cta_submits: bool = False, ats_name: str | None = None) -> ApplyResult:
-    """Run the generic navigator on ``page``; returns the application result."""
+                               cta_submits: bool = False, ats_name: str | None = None,
+                               dialog_only: bool = False) -> ApplyResult:
+    """Run the generic navigator on ``page``; returns the application result. ``dialog_only``: the application is
+    the dialog that is open on a portal's own page - nothing outside it is read or clicked."""
     settings = get_settings()
     want_ai = settings.navigator_use_ai if use_ai is None else use_ai
     reasoner = PageReasoner() if (want_ai and settings.ai_enabled) else None
-    nav = ApplicationNavigator(engine, ctx, reasoner=reasoner, cta_submits=cta_submits, ats_name=ats_name)
+    nav = ApplicationNavigator(engine, ctx, reasoner=reasoner, cta_submits=cta_submits, ats_name=ats_name,
+                               dialog_only=dialog_only)
     result = await nav.run(page)
     result.ats = result.ats or nav._ats(page)
     if result.outcome == ApplyOutcome.MANUAL_ACTION_REQUIRED and result.external_url and not result.submit_attempted:

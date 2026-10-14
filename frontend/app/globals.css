@@ -142,6 +142,9 @@ tbody tr.click:hover { background: var(--surface-2); }
 .muted { color: var(--muted); }
 .small { font-size: 12.5px; }
 .ellipsis { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* why a job was not applied to, under its status (two lines at most; the full text is the cell's tooltip) */
+.reason { max-width: 340px; margin-top: 3px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden; }
 
 input[type=text], input[type=number], input[type=search], select, textarea {
   font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border);

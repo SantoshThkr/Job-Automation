@@ -145,7 +145,17 @@ function JobInfo({ j }: { j: JobDetail }) {
         <dt>Location</dt><dd>{j.location || "—"}</dd>
         <dt>Experience</dt><dd>{j.experience_text || "—"}</dd>
         <dt>Salary</dt><dd>{j.salary_text || "—"}</dd>
-        <dt>Posted</dt><dd>{j.posted_text || "—"}</dd>
+        <dt>Posted</dt>
+        <dd data-testid="job-posted">
+          {j.posted_label || "Unknown - the portal did not show when it was posted"}
+          {j.posted_text && j.posted_source !== "page" && <div className="muted small">Listing said &ldquo;{j.posted_text}&rdquo; when found</div>}
+          {j.closed_reason && <div className="small lvl-error">Closed: {j.closed_reason}</div>}
+          {j.recency && j.recency !== "in" && j.recency_reason && (
+            <div className={`small ${j.recency === "out" ? "lvl-error" : "lvl-warning"}`}>
+              {j.recency === "out" ? "Not applied: " : "Not applied automatically: "}{j.recency_reason}
+            </div>
+          )}
+        </dd>
         <dt>Apply type</dt><dd>{j.apply_type}{j.external_url && <> · <a href={safeHref(j.external_url)} target="_blank" rel="noopener noreferrer">company site</a></>}</dd>
         <dt>Found via</dt><dd>{PORTAL_LABEL[j.portal]}{j.search_query && ` search "${j.search_query}"`} · {fmtDate(j.discovered_at)}</dd>
         {!!j.skills.length && <><dt>Portal skills</dt><dd><div className="chips">{uniqueStrings(j.skills).map((s) => <span key={s} className="chip">{s}</span>)}</div></dd></>}

@@ -199,7 +199,6 @@
     "max_jobs_per_query": 50,
     "max_applications_per_run": 15,
     "max_applications_per_day": 40,
-    "posted_within_days": 7,
     "linkedin_easy_apply_only": false,
     "delay_between_applications_s": [
       15,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
@@ -28,6 +29,10 @@ class JobPosting:
     external_url: str | None = None
     easy_apply: bool | None = None
     details_loaded: bool = False
+    # the portal's own posting date on the job page (naive UTC) and the listing's end date, when the page has them
+    posted_at: datetime | None = None
+    posted_date_only: bool = False
+    valid_through: datetime | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_job_input(self) -> JobInput:
@@ -70,3 +75,10 @@ class ApplyResult:
     # "submit attempted" mark is withdrawn, so Retry needs no confirmation and nothing has to be checked by you
     nothing_sent: bool = False
     click_ignored: bool = False  # the portal did not react to its own Apply click at all (see orchestrator)
+    # the portal's session ended in the middle of this application (what it showed). Not this job's problem: unless
+    # something may already have been sent, the job goes back to the queue and the portal waits for your next login
+    login_required: str = ""
+    # the attempt broke for a reason that has nothing to do with the job (the internet connection dropped, the
+    # browser window was closed): what happened. Unless something may already have been sent, the job goes back to
+    # the queue for a later run - a few times, then it is recorded as failed
+    transient: str = ""

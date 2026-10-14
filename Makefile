@@ -2,15 +2,16 @@ PY      := backend/.venv/bin/python
 MODE    ?= dry_run
 PORTALS ?=
 
-.PHONY: help setup api web dev agent check login-naukri login-linkedin login-instahyre test test-fast build-web demo try reevaluate test-web privacy-check hooks audit
+.PHONY: help setup api web dev agent check login-naukri login-linkedin login-instahyre login-google test test-fast build-web demo try reevaluate test-web privacy-check hooks audit site-login site-logins
 
 help:
 	@echo "make setup            install everything (Python venv, Playwright Chromium, dashboard, config)"
-	@echo "make dev              run API (:8000) + dashboard (:3000)"
+	@echo "make dev              run API (:8010) + dashboard (:3000)"
 	@echo "make agent MODE=...   run the browser agent in the foreground (dry_run | review | auto)"
-	@echo "make login-naukri     log in once (also login-linkedin, login-instahyre)"
+	@echo "make login-naukri     log in once (also login-linkedin, login-instahyre; login-google for 'Sign in with Google')"
 	@echo "make try URL=...      run the application navigator on one job page (MODE=dry_run|review|auto)"
 	@echo "make reevaluate       re-score pending jobs with the current matcher (after changing preferences)"
+	@echo "make site-login SITE=...  store the sign-in for one employer career site in the macOS Keychain (site-logins lists them)"
 	@echo "make check            validate profile, resumes, Ollama and browser"
 	@echo "make test             run the full test suite (headless browser + mock portals)"
 	@echo "make demo             try everything against local mock portals (isolated data)"
@@ -23,7 +24,7 @@ setup:
 	./scripts/setup.sh
 
 api:
-	cd backend && .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-server-header
+	cd backend && .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port $${PJA_API_PORT:-8010} --no-server-header
 
 web:
 	cd frontend && npm run dev
@@ -46,6 +47,10 @@ login-linkedin:
 login-instahyre:
 	cd backend && .venv/bin/python -m app.cli login instahyre
 
+# Sign in to Google once in the agent's own browser (for "Sign in with Google" on career sites). All typing is yours.
+login-google:
+	cd backend && .venv/bin/python -m app.cli login google
+
 test:
 	cd backend && .venv/bin/python -m pytest -q
 
@@ -64,6 +69,14 @@ try:
 
 reevaluate:
 	cd backend && .venv/bin/python -m app.cli reevaluate
+
+# Sign-in for one employer career site, stored in the macOS Keychain (macOS asks for the password itself).
+site-login:
+	@test -n "$(SITE)" || { echo 'usage: make site-login SITE=careers.example.com [USER_NAME=you@example.com]'; exit 2; }
+	cd backend && .venv/bin/python -m app.cli site-login set "$(SITE)" $(if $(USER_NAME),--user "$(USER_NAME)",)
+
+site-logins:
+	cd backend && .venv/bin/python -m app.cli site-login list
 
 test-web:
 	cd frontend && npm run typecheck && npm test

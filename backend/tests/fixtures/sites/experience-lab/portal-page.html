@@ -1,0 +1,29 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Principal Forward Deployed Engineer | PortalLab</title></head><body>
+<!-- A portal's own job page after its apply dialog has closed (LinkedIn, run #53). Every control here acts on your
+     account on the portal - saving the job, telling the employer you are interested, following the company - and
+     none of them is part of an application. ?dialog=1 shows the apply dialog on top of the same page. -->
+<header><input type="search" name="keywords" placeholder="Search jobs" aria-label="Search by title, skill, or company"></header>
+<main>
+ <h1>Principal Forward Deployed Engineer - Applied AI</h1>
+ <button id="easy" aria-label="Easy Apply to Principal Forward Deployed Engineer">Easy Apply</button>
+ <button id="save">Save</button>
+ <button id="interested">I’m interested</button>
+ <button id="follow">Follow</button>
+ <p>About the job: build with customers. Requirements: Python, distributed systems.</p>
+</main>
+<div id="toast" role="alert" hidden></div>
+<div id="dlg" role="dialog" aria-modal="true" aria-label="Apply to PortalLab" hidden>
+ <h2>Apply to PortalLab</h2>
+ <form id="app"><label>Mobile phone number <input name="phone" required></label>
+  <button type="submit" id="send">Submit application</button></form>
+</div>
+<script>
+  window.CLICKS = []; window.SUBMITS = 0;
+  for (const id of ['easy', 'save', 'interested', 'follow']) document.getElementById(id).addEventListener('click', () => {
+    window.CLICKS.push(id);
+    if (id === 'save') { const t = document.getElementById('toast'); t.hidden = false; t.textContent = 'You’ve saved this job. See saved jobs'; } });
+  document.querySelector('[name=keywords]').addEventListener('input', () => window.CLICKS.push('search'));
+  if (/[?&]dialog=1/.test(location.search)) document.getElementById('dlg').hidden = false;
+  document.getElementById('app').addEventListener('submit', (e) => { e.preventDefault(); window.SUBMITS++;
+    document.getElementById('dlg').innerHTML = '<h2 role="status">Your application was sent to PortalLab</h2>'; });
+</script></body></html>

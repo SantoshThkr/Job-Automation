@@ -17,6 +17,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+# What /api/health answers as "service". The dashboard checks it before it forwards anything: port 8000 is a popular
+# default, and another program listening on it (a Docker container of another project did, on 2026-10-13) would
+# otherwise receive the dashboard's requests - and its API token - whenever this API is not running.
+SERVICE_NAME = "personal-job-assistant"
+
 # settings whose value must never appear in a log line or an error message
 SECRET_FIELDS = ("ats_account_password", "api_token")
 MIN_TOKEN_LENGTH = 24
@@ -54,7 +59,9 @@ class Settings(BaseSettings):
 
     # API
     api_host: str = "127.0.0.1"
-    api_port: int = Field(default=8000, ge=1, le=65535)
+    # 8010, not the common 8000: another program on 8000 (on this Mac, another project's container) would answer the
+    # dashboard whenever this API is not running
+    api_port: int = Field(default=8010, ge=1, le=65535)
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
     # API protection (see app/security.py). The API is meant for this machine only.
@@ -95,6 +102,9 @@ class Settings(BaseSettings):
     # recover and then stops, leaving the remaining jobs queued. false = never check.
     memory_guard: bool = True
     memory_wait_s: int = 120
+    # At the start of a run, recent jobs that were skipped for a hard requirement under *other* preferences are
+    # evaluated again (rules only). false = leave them; `python -m app.cli reevaluate --skipped --dry` previews it.
+    reconsider_skipped: bool = True
     ai_model_memory_mb: int = 3200  # what loading the local model takes; it is not loaded with less headroom (0 = no check)
     browser_disk_cache_mb: int = 100  # cap of the agent browser's HTTP cache on disk (0 = Chrome's default)
 
@@ -115,6 +125,12 @@ class Settings(BaseSettings):
     # the agent signs in with your profile email, and may create an account when a site requires one
     # (never in Dry Run). Without it, the agent pauses and asks you to sign in.
     ats_account_password: str = ""
+    # Sign-ins stored per site in the macOS Keychain (python -m app.cli site-login set <site>) are looked up before
+    # the general password above. false = never ask the Keychain.
+    site_login_keychain: bool = True
+    # "Sign in with Google" on a career site: the assistant opens Google's own page and waits for you there (it
+    # types nothing on it). false = such buttons are left alone, as before.
+    google_signin: bool = True
     ats_create_accounts: bool = True
 
     # Portal base URLs (overridable so adapters can run against local mock sites in tests)

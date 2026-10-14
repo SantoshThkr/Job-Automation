@@ -18,9 +18,31 @@ def screenshot_url(path: str | None) -> str | None:
     return f"/api/screenshots/{Path(path).name}" if path else None
 
 
-def job_summary(job: Job) -> dict[str, Any]:
+def posting_fields(job: Job, window=None) -> dict[str, Any]:
+    """When the job was posted (never when it was found), how old it is, and what the job-recency window says."""
+    from app.matching.posting import age_days, describe, listing_closed, posted_of, utcnow, verdict
+
+    posted = posted_of(job)
+    now = utcnow()
+    out: dict[str, Any] = {
+        "posted_at": iso(posted.at) if posted else None,
+        "posted_label": describe(posted, now=now) if posted else "",
+        "posted_age_days": round(age_days(posted, now=now), 1) if posted else None,
+        "posted_date_only": bool(posted.date_only) if posted else False,
+        "posted_open_ended": bool(posted.open_ended) if posted else False,
+        "posted_source": posted.source if posted else "",
+        "closed_reason": listing_closed(job, now=now),
+    }
+    if window is not None:
+        state, why = verdict(posted, window, now=now)
+        out.update({"recency": state, "recency_reason": why})
+    return out
+
+
+def job_summary(job: Job, window=None) -> dict[str, Any]:
     app = job.application
     return {
+        **posting_fields(job, window),
         "id": job.id,
         "portal": job.portal,
         "title": job.title,
@@ -73,8 +95,8 @@ def application_dict(app: Application | None) -> dict[str, Any] | None:
     }
 
 
-def job_detail(job: Job) -> dict[str, Any]:
-    d = job_summary(job)
+def job_detail(job: Job, window=None) -> dict[str, Any]:
+    d = job_summary(job, window)
     d.update({
         "external_id": job.external_id,
         "experience_text": job.experience_text,
@@ -102,6 +124,7 @@ def agent_dict(st: AgentState, alive: bool, current_job: Job | None = None) -> d
         "gate_reason": st.gate_reason if alive else "", "gate_opened_at": iso(st.gate_opened_at),
         "gate_payload": (st.gate_payload or {}) if alive and st.gate_kind else {},
         "repeat_minutes": st.repeat_minutes,
+        "recency": recency_dict(st.recency),
         "phase": (st.phase or "") if alive else "",
         "current_step": (st.current_step or "") if alive else "",
         "current_url": (st.current_url or "") if alive else "",
@@ -110,6 +133,14 @@ def agent_dict(st: AgentState, alive: bool, current_job: Job | None = None) -> d
                          "match_score": current_job.match_score}
                         if alive and current_job is not None else None),
     }
+
+
+def recency_dict(stored: dict | None) -> dict[str, Any]:
+    """The job-recency window as the dashboard shows and edits it."""
+    from app.matching.posting import CHOICES, window_from, window_to_dict
+
+    window = window_from(stored)
+    return {**window_to_dict(window), "label": window.label(), "chosen": bool(stored), "choices": list(CHOICES)}
 
 
 def run_dict(run: Run) -> dict[str, Any]:

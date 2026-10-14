@@ -21,7 +21,7 @@ from app.engine.context import ApplyContext, SubmitDecision
 from app.engine.questions import ask_and_fill
 from app.engine.submission import confirmation_since, page_state
 from app.portals.base import PortalAdapter, SearchQuery
-from app.portals.common import EXPIRED_TEXT, all_texts, extract_cards, first_text, generic_apply_button
+from app.portals.common import EXPIRED_TEXT, all_texts, extract_cards, first_text, generic_apply_button, read_page_dates
 from app.portals.types import ApplyOutcome, ApplyResult, JobPosting
 
 log = logging.getLogger(__name__)
@@ -66,6 +66,29 @@ MODAL_CONFIRM = T("instahyre confirm", css=["button#apply-confirm", ".modal butt
                   role=("button", r"^\s*(apply|submit|send|confirm|apply now)\s*$"))
 SUCCESS = T("instahyre success", css=[".apply-success", ".toast-success", "[class*='success-message']"],
             within_text=["successfully applied", "Application sent"])
+
+
+_YEARS_LINE = re.compile(r"^\s*\d{1,2}(?:\.\d)?\s*(?:-|–|to)\s*\d{1,2}(?:\.\d)?\s*(?:years?|yrs?)\s*$|^\s*\d{1,2}\s*\+\s*(?:years?|yrs?)\s*$",
+                         re.I)
+
+
+def split_company_title(title: str, company: str = "") -> tuple[str, str]:
+    """(company, role) from Instahyre's heading "Fractal Analytics - Senior Full-Stack Engineer". Both of its
+    selectors return that whole heading, so the employer's name was part of every title: "Fractal Analytics - ..."
+    was skipped as a data role, and no Instahyre job could be recognised as the same role on another portal."""
+    title, company = (title or "").strip(), (company or "").strip()
+    if " - " not in title or (company and company != title and not title.lower().startswith(company.lower() + " - ")):
+        return company, title
+    first, _, role = title.partition(" - ")
+    return (first.strip(), role.strip()) if first.strip() and role.strip() else (company, title)
+
+
+def split_location(text: str) -> tuple[str, str]:
+    """('Chennai, Mumbai', '3-7 Years') from Instahyre's location block, which sometimes carries the experience
+    range on its second line ("Chennai, Mumbai\n3-7 Years" was stored - and shown - as the location)."""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    years = next((ln for ln in lines if _YEARS_LINE.match(ln)), "")
+    return ", ".join(ln for ln in lines if not _YEARS_LINE.match(ln)), years
 
 
 class InstahyreAdapter(PortalAdapter):
@@ -141,9 +164,11 @@ class InstahyreAdapter(PortalAdapter):
         job_id = c.get("job_id") or _id_from_url(url)
         if not job_id or not c.get("title"):
             return None
+        location, years = split_location(c.get("location", ""))
+        company, title = split_company_title(c["title"], c.get("company", ""))
         return JobPosting(portal=self.name, external_id=str(job_id), url=url or f"{self.base_url}/job-{job_id}-job/",
-                          title=c["title"], company=c.get("company", ""), location=c.get("location", ""),
-                          experience_text=c.get("experience", ""), snippet=c.get("snippet", ""),
+                          title=title, company=company, location=location,
+                          experience_text=c.get("experience", "") or years, snippet=c.get("snippet", ""),
                           skills=c.get("skills") or [], already_applied=bool(c.get("applied")))
 
     # ----------------------------------------------------------- details
@@ -152,11 +177,18 @@ class InstahyreAdapter(PortalAdapter):
         self._check_session()
         page = self.engine.page
         await self.engine.wait_for_any({"jd": T(css=DETAIL_JD[:3]), "title": T(css=DETAIL_TITLE[:2])}, timeout_ms=12_000)
-        job.title = await first_text(page, DETAIL_TITLE) or job.title
-        job.company = (await first_text(page, DETAIL_COMPANY)).split("\n")[0] or job.company
-        job.location = await first_text(page, DETAIL_LOCATION) or job.location
-        job.experience_text = await first_text(page, DETAIL_EXP) or job.experience_text
+        heading = await first_text(page, DETAIL_TITLE)
+        named = (await first_text(page, DETAIL_COMPANY)).split("\n")[0]
+        if heading:
+            company, title = split_company_title(heading, named or job.company)
+            job.title, job.company = title or job.title, company or job.company
+        elif named and named != job.title:
+            job.company = named
+        location, years = split_location(await first_text(page, DETAIL_LOCATION))
+        job.location = location or job.location
+        job.experience_text = await first_text(page, DETAIL_EXP) or years or job.experience_text
         job.description = await first_text(page, DETAIL_JD) or job.description
+        await read_page_dates(page, job)  # Instahyre lists no age; its job pages often carry datePosted
         skills = await all_texts(page, DETAIL_SKILLS)
         if skills:
             job.skills = list(dict.fromkeys([*job.skills, *skills]))

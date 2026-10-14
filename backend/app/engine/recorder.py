@@ -22,6 +22,7 @@ from app.models import (
     utcnow,
 )
 from app.portals.types import JobPosting
+from app.security import scrub_secrets
 
 _COMPANY_NOISE = re.compile(
     r"\b(?:pvt|private|ltd|limited|llp|inc|corp|corporation|co|company|technologies|technology|tech|"
@@ -62,6 +63,7 @@ def upsert_job(s: Session, p: JobPosting, *, run_id: int | None = None, query: s
     job.experience_text = p.experience_text or job.experience_text
     job.salary_text = p.salary_text or job.salary_text
     job.posted_text = p.posted_text or job.posted_text
+    record_posted(job, p)
     if p.description and len(p.description) >= len(job.description or ""):
         job.description = p.description
     elif not job.description and p.snippet:
@@ -75,6 +77,36 @@ def upsert_job(s: Session, p: JobPosting, *, run_id: int | None = None, query: s
     job.fingerprint = fingerprint(job.company, job.title)
     s.flush()
     return job, created
+
+
+def record_posted(job: Job, p: JobPosting | Any) -> None:
+    """Keep the best evidence of when the job was posted: the portal's own date beats a relative label, a precise
+    label beats an open-ended one ("3+ weeks ago"), and among equals the latest reading wins. A label is read now -
+    this moment, not the date the job was first found or its record last changed."""
+    from app.matching.posting import Posted, parse_label
+    from app.matching.posting import utcnow as now_utc
+
+    if p.valid_through is not None:
+        job.valid_through = p.valid_through
+    new: Posted | None = None
+    if p.posted_at is not None:
+        new = Posted(p.posted_at, date_only=p.posted_date_only, source="page")
+    elif p.posted_text:
+        new = parse_label(p.posted_text, seen=now_utc())
+    if new is None:
+        return
+    if job.posted_at is not None:
+        rank = lambda src, open_: (2 if src == "page" else 1, 0 if open_ else 1)  # noqa: E731
+        new_rank, old_rank = rank(new.source, new.open_ended), rank(job.posted_source or "label", bool(job.posted_open_ended))
+        if new_rank < old_rank:
+            return
+        if new_rank == old_rank and new.at >= job.posted_at - timedelta(hours=1):
+            # the same kind of evidence, read again: "1 day ago" yesterday and "2 days ago" today are one date. Only
+            # a clearly earlier one replaces it (an estimate errs towards older) - and a listing seen again
+            # unchanged leaves its record untouched
+            return
+    job.posted_at, job.posted_open_ended = new.at, new.open_ended
+    job.posted_date_only, job.posted_source, job.posted_spread_s = new.date_only, new.source, new.spread_s
 
 
 def find_duplicate(s: Session, job: Job, days: int = 60) -> Job | None:
@@ -115,8 +147,10 @@ def set_status(s: Session, job: Job, status: JobStatus | str, reason: str = "") 
 def add_event(s: Session, job_id: int | None, type_: str, message: str, *, level: str = "info",
               application_id: int | None = None, run_id: int | None = None, data: dict | None = None,
               screenshot: str | None = None) -> ApplicationEvent:
+    # (what is recorded is shown in the dashboard: no configured or stored secret is ever part of it)
     ev = ApplicationEvent(job_id=job_id, application_id=application_id, run_id=run_id, type=type_,
-                          message=message[:4000], level=level, data=_jsonable(data or {}), screenshot=screenshot)
+                          message=scrub_secrets(message)[:4000], level=level, data=_jsonable(data or {}),
+                          screenshot=screenshot)
     s.add(ev)
     s.flush()
     return ev

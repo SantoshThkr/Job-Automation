@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.ai.provider import get_provider
 from app.api.serializers import event_dict, memory_dict, qa_dict
-from app.config import get_settings
+from app.config import SERVICE_NAME, get_settings
 from app.db import get_db
 from app.engine.needs_you import saved_answer
 from app.engine.recorder import (add_event, forget_memory, local_day_start_utc, remember_answer, set_status,
@@ -34,7 +34,7 @@ ANSWER_SCOPES = {"auto", "global", "portal", "company", "job"}  # where a saved 
 @router.get("/health")
 def health(db: Session = Depends(get_db)) -> dict[str, Any]:
     db.scalar(select(func.count(Job.id)))
-    return {"ok": True}
+    return {"ok": True, "service": SERVICE_NAME}
 
 
 @router.get("/stats")

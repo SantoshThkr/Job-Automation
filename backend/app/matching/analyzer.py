@@ -42,6 +42,9 @@ class JobAnalysis:
     salary_min_lpa: float | None
     salary_max_lpa: float | None
     jd_length: int
+    experience_source: str = ""  # "listing" (the portal's experience field) | "description" | ""
+    experience_note: str = ""  # set when the listing's field and the rest of the posting disagree
+    experience_conflict: bool = False  # the field says junior, the title says senior, the description is silent
 
     def to_dict(self) -> dict:
         return {
@@ -54,6 +57,9 @@ class JobAnalysis:
             "category_weights": {k: round(v, 2) for k, v in self.category_weights.items()},
             "experience_min": self.experience_min,
             "experience_max": self.experience_max,
+            "experience_source": self.experience_source,
+            "experience_note": self.experience_note,
+            "experience_conflict": self.experience_conflict,
             "locations": self.locations,
             "work_mode": self.work_mode,
             "salary_min_lpa": self.salary_min_lpa,
@@ -67,7 +73,8 @@ class JobAnalysis:
 _TITLE_CATEGORIES: list[tuple[str, str]] = [
     ("fullstack", r"full[\s-]?stack|\bmern\b|\bmean\s+stack\b"),
     ("qa", r"\bqa\b|\bsdet\b|quality\s+(?:assurance|engineer)|\btest(?:ing)?\s+(?:engineer|analyst|lead)\b|\bautomation\s+test|\btester\b"),
-    ("mobile", r"\bandroid\b|\bios\b|\bmobile\b|\bflutter\b|react[\s-]*native|\bswift\b|\bkotlin\b"),
+    # ("mobile web" / "mobile-first" is the web, seen on a phone)
+    ("mobile", r"\bandroid\b|\bios\b|\bmobile\b(?![\s-]*(?:web|first|responsive|friendly))|\bflutter\b|react[\s-]*native|\bswift\b|\bkotlin\b"),
     ("devops", r"\bdevops\b|\bsre\b|site\s+reliability|\bcloud\s+(?:engineer|architect)\b|\bplatform\s+engineer\b|\binfrastructure\b|\bdevsecops\b"),
     ("data", r"\bdata\s+(?:scientist|engineer|analyst)\b|machine\s+learning|\bml\s+engineer\b|\bai\s+engineer\b|\banalytics\b|\bbi\s+developer\b"),
     ("frontend", r"front[\s-]?end|\bui\b|\bux\s+engineer\b|\breact(?:\.?js)?\b|\bangular(?:js)?\b|\bvue(?:\.?js)?\b|\bjavascript\b|\bjs\b|next\.?js|\bweb\s+(?:developer|engineer|ui)\b|\bsvelte\b|\btypescript\b"),
@@ -105,15 +112,24 @@ _TITLE_BACKEND_HEAVY = {
 }
 _TITLE_BACKEND_LIGHT = {
     "Python": r"\bpython\b|\bdjango\b|\bflask\b|\bfastapi\b",
-    "Node.js": r"\bnode(?:\.?js)?\b|\bnest\.?js\b|\bexpress(?:\.?js)?\b",
+    "Node.js": r"\bnode(?:\.?js)?\b|\bnest\.?js\b|\bexpress(?:\.?js)?\b",  # (after _tidy_title: "nodejs", "nestjs")
 }
 _TITLE_FRONTEND_TECH = re.compile(
     r"front[\s-]?end|\bui\b|\breact(?:\.?js)?\b(?![\s-]*native)|\bangular(?:js)?\b|\bvue(?:\.?js)?\b|next\.?js|"
     r"\btypescript\b|\bjavascript\b", re.I)
 
 
+def _tidy_title(title: str) -> str:
+    """The title with the spellings that hide a technology from the patterns put right: ". Net Full stack developer"
+    (a .NET role that passed the '.net' exclusion and was queued), "Node Js Developer" (whose "Js" read as
+    JavaScript made a backend role look like a frontend one)."""
+    t = re.sub(r"(?<![\w.])\.\s+net\b", ".net", title or "", flags=re.I)
+    return re.sub(r"\b(node|nest|express)[\s.]+js\b", r"\1js", t, flags=re.I)
+
+
 def title_backend_stack(title: str) -> tuple[list[str], list[str]]:
     """(heavy, light) backend technologies named in a job title."""
+    title = _tidy_title(title)
     t = title or ""
     heavy = [name for name, rx in _TITLE_BACKEND_HEAVY.items() if re.search(rx, t, re.I)]
     light = [name for name, rx in _TITLE_BACKEND_LIGHT.items() if re.search(rx, t, re.I)]
@@ -122,7 +138,7 @@ def title_backend_stack(title: str) -> tuple[list[str], list[str]]:
 
 def normalize_title_aliases(title: str) -> str:
     """Spelling variants used by recruiters: 'Dot Net' -> '.net', 'Back-End' -> 'backend', ..."""
-    t = title or ""
+    t = _tidy_title(title)
     t = re.sub(r"\bdot\s*net\b|\bdotnet\b", ".net", t, flags=re.I)
     t = re.sub(r"\bback[\s-]+end\b", "backend", t, flags=re.I)
     t = re.sub(r"\bfront[\s-]+end\b", "frontend", t, flags=re.I)
@@ -131,8 +147,11 @@ def normalize_title_aliases(title: str) -> str:
 
 
 def classify_title(title: str) -> str:
-    t = title or ""
+    t = _tidy_title(title)
+    says_frontend = bool(re.search(r"front[\s-]?end", t, re.I))
     for cat, pattern in _TITLE_CATEGORIES:
+        if cat == "data" and says_frontend:
+            continue  # "Senior Frontend Developer (Analytics)" names a domain, not a data role
         if re.search(pattern, t, re.I):
             if cat == "frontend" and any(title_backend_stack(t)):
                 return "fullstack"  # "Java React Developer", ".NET + React", "React + Node Developer"
@@ -168,27 +187,50 @@ def seniority_for_years(years: float | None) -> str:
 # ----------------------------------------------------------- experience ---
 
 _NUM = r"(\d{1,2}(?:\.\d)?)"
-_YRS = r"\s*\+?\s*(?:years?|yrs?)"
+_YRS = r"\s*\+?\s*(?:years?|yrs?|yoe\b)"
 _EXP_RANGE = re.compile(_NUM + r"\s*(?:-|–|—|to)\s*" + _NUM + _YRS, re.I)
-_EXP_PLUS = re.compile(_NUM + r"\s*\+\s*(?:years?|yrs?)", re.I)
+# "Experience: 2 3 Years" - a range whose dash was lost when the posting was pasted
+_EXP_RANGE_SPACED = re.compile(r"(?<![\d.])" + _NUM + r"\s+" + _NUM + _YRS, re.I)
+_EXP_PLUS = re.compile(_NUM + r"\s*\+\s*(?:years?|yrs?|yoe\b)", re.I)
 _EXP_MIN = re.compile(r"(?:minimum|min\.?|at\s*least|atleast|over)\s*(?:of\s*)?" + _NUM + _YRS, re.I)
 _EXP_SIMPLE = re.compile(
     _NUM + r"\s*(?:years?|yrs?)\s*(?:of\s+)?(?:overall\s+|total\s+|relevant\s+|professional\s+|hands[\s-]on\s+|"
            r"industry\s+|work\s+|strong\s+|solid\s+)?(?:experience|exp\b)", re.I)
 _FRESHER = re.compile(r"\bfreshers?\b", re.I)
+# years that describe the employer, not the candidate: "Established company with 10+ years of industry presence",
+# "a 25-year legacy", "serving clients for over 15 years"
+_EMPLOYER_YEARS_AFTER = re.compile(r"^\W*(?:of\s+)?(?:industry\s+presence|presence|in\s+(?:business|the\s+(?:industry|market|field))|"
+                                   r"legacy|history|excellence|track\s+record|trust|of\s+service|in\s+operation|"
+                                   r"of\s+operations?|old\b)", re.I)
+_EMPLOYER_YEARS_BEFORE = re.compile(r"(?:compan(?:y|ies)|organi[sz]ation|firm|agency|established|founded|legacy\s+of|"
+                                    r"history\s+of|clients?\s+for|customers?\s+for|in\s+business\s+for)[ \t,:-]+(?:[\w+]+[ \t,]+){0,3}$", re.I)
+
+
+def _about_the_employer(text: str, start: int, end: int) -> bool:
+    return bool(_EMPLOYER_YEARS_AFTER.search(text[end:end + 40]) or _EMPLOYER_YEARS_BEFORE.search(text[max(0, start - 60):start]))
 
 
 def parse_experience(text: str) -> tuple[float | None, float | None]:
-    """Parse '5-8 Yrs', '5+ years', 'minimum 3 years' ... into (min, max)."""
+    """Parse '5-8 Yrs', '5+ years', 'minimum 3 years' ... into (min, max). Years that describe the employer
+    ("10+ years of industry presence") are not a requirement; the end of a range ("2 to 5 years of experience") is
+    not a second, higher one."""
     if not text:
         return None, None
     candidates: list[tuple[float, float | None]] = []
-    for m in _EXP_RANGE.finditer(text):
-        lo, hi = float(m.group(1)), float(m.group(2))
-        if lo <= hi <= 40:
-            candidates.append((lo, hi))
+    spans: list[tuple[int, int]] = []
+    for rx in (_EXP_RANGE, _EXP_RANGE_SPACED):
+        for m in rx.finditer(text):
+            lo, hi = float(m.group(1)), float(m.group(2))
+            spaced = rx is _EXP_RANGE_SPACED
+            if any(a <= m.start() < b for a, b in spans) or _about_the_employer(text, m.start(), m.end()):
+                continue
+            if lo <= hi <= 40 and not (spaced and (lo == hi or hi - lo > 6 or hi > 20)):
+                candidates.append((lo, hi))
+                spans.append(m.span())
     for rx in (_EXP_PLUS, _EXP_MIN, _EXP_SIMPLE):
         for m in rx.finditer(text):
+            if any(a <= m.start(1) < b for a, b in spans) or _about_the_employer(text, m.start(), m.end()):
+                continue
             lo = float(m.group(1))
             if lo <= 30 and not any(c[0] == lo for c in candidates):
                 candidates.append((lo, None))
@@ -199,6 +241,42 @@ def parse_experience(text: str) -> tuple[float | None, float | None]:
     # the overall requirement is normally the most demanding one
     lo, hi = max(candidates, key=lambda c: (c[0], c[1] or 0))
     return lo, hi
+
+
+def _span(lo: float | None, hi: float | None) -> str:
+    return f"{lo or 0:g}-{hi:g}" if hi is not None else f"{lo or 0:g}+"
+
+
+def posting_experience(job: JobInput) -> tuple[float | None, float | None, str, str, bool]:
+    """(min, max, source, note, conflict): the experience a posting asks for.
+
+    The portal's own experience field comes first, the description when that field is empty. Recruiters often leave
+    the field at a junior default ("0-2 Yrs" on Naukri) for senior roles - 'Senior Frontend Software Engineer',
+    field "0-2 Yrs", description "5+ years' experience in HTML, CSS, JS, React". So a junior range in the field is
+    not taken at face value when the rest of the posting says otherwise:
+
+    * the description states clearly more (at least 2 years above the field's maximum) and the title is not a
+      junior one -> the description's figure is used;
+    * only the title disagrees (Senior / Lead / Staff / Principal) -> the field is kept and the posting is marked
+      as conflicting, which sends it to your review instead of skipping it."""
+    lo, hi = parse_experience(job.experience_text)
+    jd_lo, jd_hi = parse_experience(job.description)
+    if lo is None:
+        return jd_lo, jd_hi, ("description" if jd_lo is not None else ""), "", False
+    if hi is None or hi > 3:
+        return lo, hi, "listing", "", False
+    level = title_seniority(job.title)
+    if level in {"intern", "junior"}:
+        return lo, hi, "listing", "", False
+    if jd_lo is not None and jd_lo >= hi + 2:
+        note = (f"The listing's experience field says {_span(lo, hi)} years but the description asks for "
+                f"{_span(jd_lo, jd_hi)}: the description is used")
+        return jd_lo, jd_hi, "description", note, False
+    if SENIORITY_RANK.get(level, 0) >= SENIORITY_RANK["senior"]:
+        note = (f"The listing's experience field says {_span(lo, hi)} years but the title says "
+                f"'{level}' - one of them is wrong")
+        return lo, hi, "listing", note, True
+    return lo, hi, "listing", "", False
 
 
 # ------------------------------------------------------------- location ---
@@ -387,9 +465,7 @@ def analyze_job(job: JobInput) -> JobAnalysis:
     else:
         ratio = prior if category in _TITLE_PRIOR and category not in {"generic", "other"} else None
 
-    exp_lo, exp_hi = parse_experience(job.experience_text)
-    if exp_lo is None:
-        exp_lo, exp_hi = parse_experience(job.description)
+    exp_lo, exp_hi, exp_source, exp_note, exp_conflict = posting_experience(job)
 
     sal_lo, sal_hi = parse_salary_lpa(job.salary_text)
     frameworks = {s for s in skills if (d := skill_def(s)) and d.framework}
@@ -404,6 +480,9 @@ def analyze_job(job: JobInput) -> JobAnalysis:
         category_weights=weights,
         experience_min=exp_lo,
         experience_max=exp_hi,
+        experience_source=exp_source,
+        experience_note=exp_note,
+        experience_conflict=exp_conflict,
         locations=parse_locations(job.location) or parse_locations(job.description[:600]),
         work_mode=parse_work_mode(job.location, job.description),
         salary_min_lpa=sal_lo,

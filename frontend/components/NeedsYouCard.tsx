@@ -7,7 +7,8 @@ import { useAction } from "@/lib/hooks";
 import { PORTAL_LABEL, fmtDate, hostOf, safeHref, uniqueStrings } from "@/lib/format";
 
 const KIND_LABEL: Record<string, string> = {
-  questions: "Questions", profile: "Profile", account: "Sign-in / account", verification: "CAPTCHA / OTP",
+  questions: "Questions", decision: "Needs decision", profile: "Profile", account: "Sign-in / account",
+  verification: "CAPTCHA / OTP",
   email: "Email only", site_error: "Site error", not_registered: "Not sent",
   unconfirmed: "Submitted — confirmation not verified",
   form_rejected: "Form rejected a value", navigation: "Could not continue", review: "Your approval", other: "Other",

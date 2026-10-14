@@ -85,7 +85,7 @@ def test_fingerprint_normalises_company_and_title():
 
 
 def test_api_endpoints(client):
-    assert client.get("/api/health").json() == {"ok": True}
+    assert client.get("/api/health").json() == {"ok": True, "service": "personal-job-assistant"}  # (it says who is answering)
     prof = client.get("/api/profile").json()
     assert prof["ready_for_submission"] is True
     assert client.get("/api/stats").json()["jobs_discovered"] == 0
@@ -150,3 +150,24 @@ def test_restart_persistence(clean_db):
     reset_engine()
     with session_scope() as s:
         assert s.query(Job).filter_by(external_id="persist-1").count() == 1
+
+
+def test_no_source_file_is_hidden_from_git_by_an_ignore_rule():
+    """The ignore rules that keep private files out (``credentials.*``, ``secrets/``, ``*.env`` ...) must never
+    swallow a source file: a module named ``app/credentials.py`` worked on this machine and would simply have been
+    missing from every commit."""
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    if not (root / ".git").exists() or not shutil.which("git"):
+        pytest.skip("not a git checkout")
+    sources = [str(p.relative_to(root)) for base in ("backend/app", "backend/tests", "frontend/app", "frontend/components",
+                                                     "frontend/lib", "frontend/tests", "scripts")
+               for p in (root / base).rglob("*") if p.is_file() and p.suffix in {".py", ".ts", ".tsx", ".html", ".sh", ".css"}
+               and "__pycache__" not in p.parts and "node_modules" not in p.parts]
+    assert len(sources) > 150
+    out = subprocess.run(["git", "check-ignore", "--stdin"], input="\n".join(sources), capture_output=True, text=True,
+                         cwd=root, check=False)
+    assert out.stdout.split() == [], f"ignored by .gitignore: {out.stdout.split()}"

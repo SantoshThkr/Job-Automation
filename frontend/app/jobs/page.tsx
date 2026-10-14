@@ -3,6 +3,7 @@
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { JobTable } from "@/components/JobTable";
+import { RecencyPicker } from "@/components/RecencyPicker";
 import { api } from "@/lib/api";
 import { usePoll } from "@/lib/hooks";
 import { PORTAL_LABEL, STATUS_LABEL } from "@/lib/format";
@@ -18,6 +19,8 @@ function JobsInner() {
   const [q, setQ] = useState(params.get("q") ?? "");
   const [appsOnly, setAppsOnly] = useState(params.get("applications_only") === "true");
   const [sort, setSort] = useState(params.get("sort") ?? "date");
+  // the list follows the job-recency window unless you ask for every posting date (history stays reachable)
+  const [anyDate, setAnyDate] = useState(params.get("posted") === "any");
   const [page, setPage] = useState(1);
   const [debouncedQ, setDebouncedQ] = useState(q);
 
@@ -34,15 +37,18 @@ function JobsInner() {
     if (debouncedQ) next.set("q", debouncedQ);
     if (appsOnly) next.set("applications_only", "true");
     if (sort !== "date") next.set("sort", sort);
+    if (anyDate) next.set("posted", "any");
     router.replace(`/jobs${next.size ? `?${next}` : ""}`, { scroll: false });
     setPage(1);
-  }, [status, portal, decision, debouncedQ, appsOnly, sort, router]);
+  }, [status, portal, decision, debouncedQ, appsOnly, sort, anyDate, router]);
 
-  const { data, error } = usePoll(
-    () => api.jobs({ status, portal, decision, q: debouncedQ, applications_only: appsOnly, sort, page, page_size: PAGE_SIZE }),
+  const { data, error, refresh } = usePoll(
+    () => api.jobs({ status, portal, decision, q: debouncedQ, applications_only: appsOnly, sort, page, page_size: PAGE_SIZE,
+                     recency: !anyDate }),
     6000,
-    [status, portal, decision, debouncedQ, appsOnly, sort, page],
+    [status, portal, decision, debouncedQ, appsOnly, sort, page, anyDate],
   );
+  const recency = data?.recency;
   const pages = data ? Math.max(1, Math.ceil(data.total / PAGE_SIZE)) : 1;
 
   return (
@@ -50,7 +56,13 @@ function JobsInner() {
       <div className="page-head">
         <div>
           <h1>Jobs</h1>
-          <p className="sub">{data ? `${data.total} job(s)` : "Loading…"}{error && <span className="lvl-error"> · {error}</span>}</p>
+          <p className="sub" data-testid="jobs-count">
+            {data ? `${data.total} job(s)` : "Loading…"}
+            {recency && (recency.applied
+              ? ` ${recency.label} or with an unknown posting date`
+              : anyDate && !recency.all ? " - every posting date (older jobs included)" : "")}
+            {error && <span className="lvl-error"> · {error}</span>}
+          </p>
         </div>
       </div>
       <div className="card row">
@@ -77,6 +89,12 @@ function JobsInner() {
           <option value="company">Company</option>
         </select>
         <label className="check small"><input type="checkbox" checked={appsOnly} onChange={(e) => setAppsOnly(e.target.checked)} /> Applications only</label>
+        <label className="check small" title="Only changes this list - what the assistant applies to follows the job-recency window">
+          <input type="checkbox" checked={anyDate} onChange={(e) => setAnyDate(e.target.checked)} /> Show older jobs too
+        </label>
+      </div>
+      <div className="card">
+        <RecencyPicker recency={recency} onChange={refresh} />
       </div>
       <JobTable jobs={data?.items ?? []} />
       {pages > 1 && (

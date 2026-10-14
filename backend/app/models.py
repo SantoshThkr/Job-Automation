@@ -107,6 +107,15 @@ class Job(Base):
     experience_text: Mapped[str] = mapped_column(String(128), default="")
     salary_text: Mapped[str] = mapped_column(String(128), default="")
     posted_text: Mapped[str] = mapped_column(String(128), default="")
+    # when the job was posted (naive UTC), from the portal's own date on the job page or from a listing's relative
+    # label read at a known moment ("3+ weeks ago" -> open-ended: then or earlier). Never the date it was found.
+    posted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    posted_open_ended: Mapped[bool] = mapped_column(Boolean, default=False)
+    posted_date_only: Mapped[bool] = mapped_column(Boolean, default=False)
+    posted_source: Mapped[str] = mapped_column(String(16), default="")  # page | label
+    # a label's precision in seconds ("1 week ago": a week - posted 7 to 13 days before it was read); 0 for a date
+    posted_spread_s: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    valid_through: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # the listing's own end date
     description: Mapped[str] = mapped_column(Text, default="")
     skills: Mapped[list[str]] = mapped_column(JSON, default=list)
     apply_type: Mapped[str] = mapped_column(String(32), default="unknown")  # portal|external|unknown
@@ -286,6 +295,10 @@ class AgentState(Base):
     current_url: Mapped[str] = mapped_column(Text, default="")
     phase: Mapped[str] = mapped_column(String(32), default="")  # discovering|applying|waiting|idle
     repeat_minutes: Mapped[int] = mapped_column(Integer, default=0)
+    # Job recency, chosen in the dashboard: {"days": 7} | {"start": "2026-10-01", "end": "2026-10-14"} | {"all": true}
+    # ({} = not chosen yet: the last 7 days). Read by every run - search, queue, re-evaluation and the last check
+    # before an application is sent.
+    recency: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
     @classmethod

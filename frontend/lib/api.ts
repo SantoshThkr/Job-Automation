@@ -41,11 +41,29 @@ export interface AgentState {
   gate_opened_at: string | null;
   gate_payload: GatePayload;
   repeat_minutes: number;
+  recency: Recency;
   phase: string;
   current_step: string;
   current_url: string;
   current_job: CurrentJob | null;
 }
+
+/** The job-recency window: which posting dates the assistant searches, queues and applies to. Exactly one of
+ * `days`, a `start`/`end` range, or `all` is set. Kept by the backend - the same for every page, refresh and run. */
+export interface Recency {
+  days?: number;
+  start?: string | null;
+  end?: string | null;
+  all?: boolean;
+  /** "posted in the last 7 days", "posted 2026-09-01 to today", "all dates" */
+  label: string;
+  /** false: nothing chosen yet - the default (the last 7 days) applies */
+  chosen: boolean;
+  /** the "last N days" options */
+  choices: number[];
+}
+
+export type RecencyChoice = { days: number } | { start: string; end: string | null } | { all: true };
 
 export interface CurrentJob {
   id: number;
@@ -102,6 +120,21 @@ export interface JobSummary {
   applied_at: string | null;
   ats_platform: string | null;
   frontend_ratio: number | null;
+  /** when the job was posted (the portal's date, or its listing label when found) - never when it was found */
+  posted_at: string | null;
+  /** "on 2026-10-12 (2 days ago, from the listing's label)", "at least 21 days ago (on or before ...)", "" */
+  posted_label: string;
+  posted_age_days: number | null;
+  /** a calendar date without a time (its age counts calendar days) */
+  posted_date_only?: boolean;
+  /** "3+ weeks ago": posted then or (perhaps much) earlier */
+  posted_open_ended: boolean;
+  posted_source: "" | "page" | "label";
+  /** why the listing is closed by its own end date, or "" */
+  closed_reason: string;
+  /** against the job-recency window: in it, outside it, or unknown (never applied to automatically) */
+  recency?: "in" | "out" | "unknown";
+  recency_reason?: string;
 }
 
 export interface QA {
@@ -234,6 +267,8 @@ export interface NeedsYouQuestion {
   suggestion: string | null;
   suggestion_note: string;
   sensitive: boolean;
+  /** asks for your decision (a preference, a legal or pay-related statement), not for a missing fact */
+  decision?: boolean;
 }
 
 export interface NeedsYouItem {
@@ -291,6 +326,15 @@ export interface AIStatus {
   error: string;
 }
 
+export interface JobList {
+  items: JobSummary[];
+  total: number;
+  page: number;
+  page_size: number;
+  /** the job-recency window, and whether this list was limited to it */
+  recency: Recency & { applied: boolean };
+}
+
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
     super(message);
@@ -327,6 +371,8 @@ export const api = {
   resume: () => post<AgentState>("/api/agent/resume"),
   stop: () => post<AgentState>("/api/agent/stop"),
   setMode: (mode: Mode) => request<AgentState>("/api/agent/mode", { method: "PUT", body: JSON.stringify({ mode }) }),
+  setRecency: (choice: RecencyChoice) =>
+    request<AgentState>("/api/agent/recency", { method: "PUT", body: JSON.stringify(choice) }),
   gate: (response: "approve" | "reject", job_id?: number | null, answers?: Record<string, string>) =>
     post<AgentState>("/api/agent/gate", { response, job_id: job_id ?? null, answers: answers ?? null }),
   runs: (limit = 10) => request<RunItem[]>(`/api/agent/runs?limit=${limit}`),
@@ -335,7 +381,7 @@ export const api = {
     Object.entries(params).forEach(([k, v]) => {
       if (v !== undefined && v !== "" && v !== false) q.set(k, String(v));
     });
-    return request<{ items: JobSummary[]; total: number; page: number; page_size: number }>(`/api/jobs?${q}`);
+    return request<JobList>(`/api/jobs?${q}`);
   },
   job: (id: number | string) => request<JobDetail>(`/api/jobs/${id}`),
   jobAction: (id: number, action: string, extra: Record<string, unknown> = {}) =>

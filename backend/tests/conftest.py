@@ -34,6 +34,7 @@ def _setup_env(base: Path) -> None:
     # (tests/test_memory_guard.py switches it on and feeds it known states)
     os.environ["PJA_MEMORY_GUARD"] = "false"
     os.environ["PJA_ATS_ACCOUNT_PASSWORD"] = ""
+    os.environ["PJA_SITE_LOGIN_KEYCHAIN"] = "false"  # tests never read or write the real macOS Keychain
     # API protection: Starlette's TestClient addresses the app as "testserver"; the rate limiter is switched on by
     # the security tests themselves so unrelated tests never depend on how many requests ran before them
     os.environ["PJA_ALLOWED_HOSTS"] = "testserver,localhost,127.0.0.1"
@@ -70,6 +71,7 @@ def test_env(tmp_path_factory) -> Iterator[Path]:
     set_profile_store(None)
     set_provider(None)
     init_db()
+    _all_dates()
     yield base
     reset_engine()
 
@@ -97,6 +99,7 @@ def clean_db():
         st.gate_response = None
         st.pending_job_id = None
         st.portals = []
+        st.recency = {"all": True}
     yield
 
 
@@ -148,3 +151,13 @@ def ollama_is_running() -> bool:
         return r.status_code == 200 and bool(r.json().get("models"))
     except Exception:
         return False
+
+
+def _all_dates() -> None:
+    """The mock portals' jobs carry no posting dates, and tests of application flows are not about a job's age: they
+    run with "All dates". Recency has its own tests (tests/test_recency.py), which choose their windows themselves."""
+    from app.db import session_scope
+    from app.models import AgentState
+
+    with session_scope() as s:
+        AgentState.get(s).recency = {"all": True}

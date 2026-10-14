@@ -6,16 +6,19 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
-from sqlalchemy import func, or_, select
+from datetime import UTC, timedelta
+
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.ai.job_assistant import JobAssistant
-from app.api.serializers import job_detail, job_summary
+from app.api.serializers import job_detail, job_summary, recency_dict
 from app.db import get_db
 from app.engine.recorder import add_event, save_match, set_status
 from app.matching.analyzer import JobInput
 from app.matching.matcher import JobMatcher
-from app.models import Application, Decision, Job, JobStatus, utcnow
+from app.matching.rules import decision_reason
+from app.models import AgentState, Application, Decision, Job, JobStatus, utcnow
 from app.profile import get_profile
 from app.security import require_ai_budget
 
@@ -45,6 +48,8 @@ def list_jobs(
     decision: str | None = Query(None, max_length=32, pattern=_WORDS),
     q: str | None = Query(None, max_length=200),
     applications_only: bool = False,
+    recency: bool = Query(False, description="only jobs posted within the job-recency window (chosen in the dashboard)"),
+    include_undated: bool = Query(True, description="with recency: also list jobs whose posting date is unknown"),
     sort: Literal["date", "updated", "score", "company"] = "date",
     page: int = Query(1, ge=1, le=100_000),
     page_size: int = Query(50, ge=1, le=200),
@@ -64,6 +69,12 @@ def list_jobs(
         like = f"%{term}%"
         filters.append(or_(Job.title.ilike(like, escape="\\"), Job.company.ilike(like, escape="\\"),
                            Job.location.ilike(like, escape="\\")))
+    from app.matching.posting import window_from
+
+    stored = AgentState.get(db).recency
+    window = window_from(stored)
+    if recency and not window.all_dates:
+        filters.append(_posted_filter(window, include_undated))
     if applications_only:
         stmt = stmt.join(Application, Application.job_id == Job.id)
         count_stmt = count_stmt.join(Application, Application.job_id == Job.id)
@@ -73,7 +84,33 @@ def list_jobs(
     total = db.scalar(count_stmt) or 0
     order = SORTS.get(sort, SORTS["date"])
     rows = db.scalars(stmt.order_by(order, Job.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
-    return {"items": [job_summary(j) for j in rows], "total": total, "page": page, "page_size": page_size}
+    return {"items": [job_summary(j, window) for j in rows], "total": total, "page": page, "page_size": page_size,
+            "recency": {**recency_dict(stored), "applied": bool(recency and not window.all_dates)}}
+
+
+def _posted_filter(window, include_undated: bool):
+    """Jobs posted within the window (by their stored posting date; an open-ended "3+ weeks ago" counts by its
+    latest possible date). Jobs without a posting date only when asked for."""
+    from datetime import datetime, time
+
+    from app.matching.posting import _local_noon_utc, local_tz, utcnow
+
+    def at(day, end: bool = False):
+        moment = datetime.combine(day, time.max if end else time.min, tzinfo=local_tz())
+        return moment.astimezone(UTC).replace(tzinfo=None)
+
+    if window.start or window.end:
+        cond = Job.posted_at.is_not(None)
+        if window.start:
+            cond = and_(cond, Job.posted_at >= at(window.start))
+        if window.end:
+            cond = and_(cond, Job.posted_at <= at(window.end, end=True))
+    else:  # as verdict() counts: a moment by the clock, a calendar date (stored at local noon) by days
+        today = datetime.now(local_tz()).date()
+        first_day = _local_noon_utc(today - timedelta(days=window.days))
+        cond = or_(and_(Job.posted_date_only.is_(True), Job.posted_at >= first_day),
+                   and_(Job.posted_date_only.is_not(True), Job.posted_at >= utcnow() - timedelta(days=window.days)))
+    return or_(cond, Job.posted_at.is_(None)) if include_undated else cond
 
 
 @router.get("/{job_id}")
@@ -81,7 +118,9 @@ def get_job(job_id: JobId, db: Session = Depends(get_db)) -> dict[str, Any]:
     job = db.get(Job, job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
-    return job_detail(job)
+    from app.engine.recency import current_window
+
+    return job_detail(job, current_window())
 
 
 class JobAction(BaseModel):
@@ -188,9 +227,13 @@ async def reevaluate(job_id: JobId, request: Request, use_ai: bool = False,
                                              salary_text=job.salary_text, skills=job.skills or []), use_ai=use_ai)
     save_match(db, job, result.to_dict())
     if job.status in {JobStatus.NEW, JobStatus.SKIPPED, JobStatus.REVIEW_PENDING, JobStatus.QUEUED}:
+        from app.engine.recency import adjust, current_window
+
+        decision, why, _ = adjust(Decision(result.decision), decision_reason(result, get_profile().matching.apply_threshold),
+                                  job, current_window())
         new_status = {Decision.APPLY: JobStatus.QUEUED, Decision.SKIP: JobStatus.SKIPPED,
-                      Decision.MANUAL_REVIEW: JobStatus.REVIEW_PENDING}[Decision(result.decision)]
-        set_status(db, job, new_status, "; ".join(result.blockers or result.flags or result.reasons[:1]))
+                      Decision.MANUAL_REVIEW: JobStatus.REVIEW_PENDING}[decision]
+        set_status(db, job, new_status, why)
     add_event(db, job.id, "reevaluated", f"Re-evaluated: {result.decision} ({result.score})")
     db.flush()
     return job_detail(job)

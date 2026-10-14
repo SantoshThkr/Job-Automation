@@ -64,7 +64,8 @@ async def _heartbeat(control: AgentControl) -> None:
 
 
 async def run_agent(mode: str | None = None, portals: list[str] | None = None, repeat_minutes: int | None = None,
-                    headless: bool | None = None, max_applications: int | None = None) -> int:
+                    headless: bool | None = None, max_applications: int | None = None,
+                    only_jobs: set[int] | None = None, max_searches: int | None = None, search_only: bool = False) -> int:
     setup_logging("agent")
     init_db()
     lock = AgentLock()
@@ -112,6 +113,9 @@ async def run_agent(mode: str | None = None, portals: list[str] | None = None, r
     assistant = JobAssistant() if settings.ai_enabled else None
     orchestrator = Orchestrator(engine, control, assistant=assistant)
     orchestrator.max_applications = max_applications  # a cap for this run only (the profile is not changed)
+    orchestrator.only_jobs = only_jobs  # a controlled run: exactly these queued jobs, no search
+    orchestrator.max_searches = max_searches
+    orchestrator.search_only = search_only  # find and evaluate only: nothing in the queue is touched
     exit_code = 0
     try:
         while True:
@@ -160,8 +164,25 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--repeat-minutes", type=int, help="run again every N minutes (0 = single run)")
     p.add_argument("--headless", action="store_true", help="run the browser headless (no login possible)")
     p.add_argument("--max-applications", type=int, help="stop applying after N attempts in this run")
+    p.add_argument("--jobs", help="apply only to these queued jobs (comma separated job numbers): no search, nothing "
+                                  "else from the queue")
+    p.add_argument("--max-searches", type=int, help="search at most N query/location pairs per portal in this run")
+    p.add_argument("--search-only", action="store_true", help="find and evaluate new listings only: no job in the "
+                                                             "queue is applied to, checked or changed")
     a = p.parse_args(argv)
     portals = [x.strip() for x in a.portals.split(",") if x.strip()] if a.portals else None
+    only_jobs = None
+    if a.jobs is not None:
+        try:
+            only_jobs = {int(x) for x in a.jobs.replace(" ", "").split(",") if x}
+        except ValueError:
+            p.error("--jobs takes job numbers, e.g. --jobs 1201,1305")
+        if not only_jobs:
+            p.error("--jobs needs at least one job number")
+    if a.max_searches is not None and a.max_searches < 0:
+        p.error("--max-searches cannot be negative")
+    if a.search_only and only_jobs is not None:
+        p.error("--search-only and --jobs exclude each other (--jobs: no search)")
     import os
 
     from app.config import ConfigError
@@ -175,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     harden_permissions()
     return asyncio.run(run_agent(a.mode, portals, a.repeat_minutes, True if a.headless else None,
-                                 a.max_applications))
+                                 a.max_applications, only_jobs, a.max_searches, a.search_only))
 
 
 if __name__ == "__main__":

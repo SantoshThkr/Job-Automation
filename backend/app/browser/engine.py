@@ -33,7 +33,7 @@ from playwright.async_api import (
     TimeoutError as PlaywrightTimeout,
 )
 
-from app.security import is_web_url
+from app.security import is_web_url, scrub_html
 from app.browser.errors import BrowserCrashed, ElementNotFound, NavigationFailed
 from app.browser.selectors import Target
 from app.config import Settings, get_settings
@@ -561,7 +561,8 @@ class BrowserEngine:
             try:
                 # (bounded: on a page stuck in a navigation that never finishes, content() waits for ever - run #42
                 # hung there for 9 minutes after a LinkedIn page timed out, deaf to Stop, with the browser open)
-                html = await asyncio.wait_for(p.content(), CAPTURE_TIMEOUT_S)
+                # (saved for diagnosis: never with a password in it - see scrub_html)
+                html = scrub_html(await asyncio.wait_for(p.content(), CAPTURE_TIMEOUT_S))
                 html_file = Path(shot).with_suffix(".html") if shot else (
                     self.screenshot_dir / f"{datetime.now():%Y%m%d-%H%M%S}-fail-{name}.html")
                 html_file.write_text(html, encoding="utf-8")

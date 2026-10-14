@@ -476,3 +476,31 @@ async def test_landing_on_the_sites_login_page_after_submit_is_not_a_confirmatio
     assert len(ctx.submits) == 1
     assert engine.page.url.endswith("/submit-lab/login.html")
     assert await engine.page.evaluate("() => [document.querySelector('[name=phone]').value, window.OTP_REQUESTS]") == ["", 0]
+
+
+# ------------------------------------------------------------------ a portal's own page is not an application
+
+async def test_a_hand_off_without_its_dialog_touches_nothing_on_the_portal_page(engine, site_server, profile):
+    """LinkedIn, run #53: the Easy Apply dialog was gone when the navigator took over. On the job page behind it,
+    it clicked "Easy Apply" twice, the local model chose "I'm interested", and "Save" saved the job - whose toast was
+    then reported as a form error. Outside the dialog nothing is the application: nothing is clicked or typed."""
+    from app.navigator.agent import navigate_application
+
+    await engine.goto(f"{site_server}/experience-lab/portal-page.html")
+    ctx = make_ctx(engine, profile, JOB, AgentMode.AUTO, FakeGate())
+    res = await navigate_application(engine, engine.page, ctx, ats_name="linkedin-easy-apply", dialog_only=True)
+    assert res.outcome == ApplyOutcome.MANUAL_ACTION_REQUIRED and "closed before the application was finished" in res.message
+    assert res.nothing_sent and not res.submit_attempted
+    assert await engine.page.evaluate("() => [window.CLICKS, window.SUBMITS]") == [[], 0]
+    assert not ctx.gate.calls and not ctx.submits
+
+
+async def test_a_hand_off_works_inside_the_dialog_and_only_there(engine, site_server, profile):
+    from app.navigator.agent import navigate_application
+
+    await engine.goto(f"{site_server}/experience-lab/portal-page.html?dialog=1")
+    ctx = make_ctx(engine, profile, JOB, AgentMode.AUTO, FakeGate())
+    res = await navigate_application(engine, engine.page, ctx, ats_name="linkedin-easy-apply", dialog_only=True)
+    assert res.outcome == ApplyOutcome.APPLIED, (res.outcome, res.message)
+    assert "Your application was sent" in res.confirmation_text
+    assert await engine.page.evaluate("() => [window.CLICKS, window.SUBMITS]") == [[], 1]  # the search box included

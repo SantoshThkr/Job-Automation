@@ -358,3 +358,168 @@ def test_retry_still_needs_an_explicit_force_when_a_submit_may_have_gone_out(cle
         assert c.get(f"/api/jobs/{sent}").json()["status"] == "MANUAL_ACTION_REQUIRED"  # nothing changed
         assert c.post(f"/api/jobs/{sent}/action", json={"action": "retry", "force": True}).json()["status"] == "QUEUED"
         assert c.post(f"/api/jobs/{unsent}/action", json={"action": "retry"}).json()["status"] == "QUEUED"
+
+
+# ------------------------------------------------------------------ a portal session that ends in the middle of a run
+
+def _session_ends(at: int, *, after_submit: bool = False):
+    """From the ``at``-th application on, the portal answers with its login page."""
+    from app.browser.errors import LoginRequired
+
+    calls: list[str] = []
+
+    def wrap(adapter):
+        original = adapter.apply
+
+        async def apply(job, ctx):
+            calls.append(job.external_id)
+            if len(calls) >= at:
+                if after_submit:
+                    await ctx.mark_submit_attempt()
+                raise LoginRequired("naukri", "Naukri session expired (redirected to login)")
+            return await original(job, ctx)
+
+        adapter.apply = apply
+        return adapter
+
+    return wrap, calls
+
+
+def _statuses() -> dict[str, tuple[str, str]]:
+    with session_scope() as s:
+        return {j.external_id: (j.status, j.status_reason or "") for j in s.scalars(select(Job).where(Job.portal == "naukri"))}
+
+
+@pytest.mark.browser
+async def test_an_expired_portal_session_keeps_its_jobs_queued(engine, site_server, clean_db):
+    """The session ends at the second application. That job is not applied, not skipped and not parked on you: it
+    is back in the queue with the reason; the portal's remaining jobs are not even opened; it is said once."""
+    wrap, calls = _session_ends(2)
+    summary, orch = await _run(engine, site_server, wrap)
+    assert summary["status"] == "COMPLETED", summary
+    assert len(calls) == 2  # after the session ended no further job of the portal was tried
+    after = _statuses()
+    status, reason = after[calls[1]]
+    assert status == JobStatus.QUEUED and "session expired" in reason and "log in to naukri again" in reason
+    assert not any(st in {JobStatus.SKIPPED, JobStatus.FAILED} and "session" in why.lower() for st, why in after.values())
+    assert not any("session expired" in why for st, why in after.values() if st == JobStatus.MANUAL_ACTION_REQUIRED)
+    assert sum(1 for st, _ in after.values() if st == JobStatus.QUEUED) >= 2  # the others wait too
+    said = _events("login_required")
+    assert len(said) == 1 and "make login-naukri" in said[0].message and "Nothing was skipped" in said[0].message
+    assert len([e for e in _events("requeued") if "session expired" in e.message]) == 1
+    assert orch.logged_out == {"naukri": "Naukri session expired (redirected to login)"}
+    with session_scope() as s:
+        job = s.scalar(select(Job).where(Job.external_id == calls[1]))
+        assert job.application is None or not (job.application.confirmed or job.application.submit_attempted)
+
+
+@pytest.mark.browser
+async def test_a_session_that_ends_after_the_submit_click_is_yours_to_verify(engine, site_server, clean_db):
+    """Something may have been sent: that job is never put back to be applied to again by itself."""
+    wrap, calls = _session_ends(1, after_submit=True)
+    summary, _orch = await _run(engine, site_server, wrap)
+    assert summary["status"] == "COMPLETED", summary
+    status, reason = _statuses()[calls[0]]
+    assert status == JobStatus.MANUAL_ACTION_REQUIRED and "session expired" in reason
+    with session_scope() as s:
+        job = s.scalar(select(Job).where(Job.external_id == calls[0]))
+        assert job.application.submit_attempted and not job.application.confirmed
+    assert len(calls) == 1 and len(_events("login_required")) == 1
+
+
+@pytest.mark.browser
+async def test_the_next_run_tries_the_portal_again(engine, site_server, clean_db):
+    wrap, calls = _session_ends(1)
+    _summary, orch = await _run(engine, site_server, wrap)
+    assert orch.logged_out and len(calls) == 1
+    first = calls[0]
+    wrap2, calls2 = _session_ends(10**6)  # you logged in again: nothing ends the session now
+    summary2, orch2 = await _run(engine, site_server, wrap2)
+    assert summary2["status"] == "COMPLETED" and orch2.logged_out == {}
+    assert first in calls2 and _statuses()[first][0] != JobStatus.QUEUED  # the requeued job got its turn
+
+
+# ------------------------------------------------------------------ an attempt that broke for a passing reason
+
+def _breaks(make_error, *, times: int = 1, after_submit: bool = False):
+    """The first native application of each run breaks with ``make_error()`` (``times`` runs in a row)."""
+    state = {"left": times, "job": ""}
+    calls: list[str] = []
+
+    def wrap(adapter):
+        original = adapter.apply
+
+        async def apply(job, ctx):
+            if job.apply_type == "external":
+                return await original(job, ctx)
+            calls.append(job.external_id)
+            victim = state["job"] or job.external_id
+            if job.external_id == victim and state["left"] > 0:
+                state["job"], state["left"] = victim, state["left"] - 1
+                if after_submit:
+                    await ctx.mark_submit_attempt()
+                raise make_error()
+            return await original(job, ctx)
+
+        adapter.apply = apply
+        return adapter
+
+    return wrap, calls, state
+
+
+def _offline():
+    from app.browser.errors import NavigationFailed
+
+    return NavigationFailed("Could not load https://www.naukri.test/job-1: Page.goto: net::ERR_INTERNET_DISCONNECTED")
+
+
+@pytest.mark.browser
+async def test_a_dropped_connection_keeps_the_job_in_the_queue(engine, site_server, clean_db):
+    """Thirteen jobs had been recorded as Failed because the internet dropped (or the browser window was closed)
+    in the middle of an application. Nothing about the job failed and nothing was sent: it waits in the queue."""
+    wrap, calls, state = _breaks(_offline)
+    summary, _orch = await _run(engine, site_server, wrap)
+    assert summary["status"] == "COMPLETED", summary
+    status, reason = _statuses()[state["job"]]
+    assert status == JobStatus.QUEUED and "the internet connection dropped" in reason and "nothing was sent" in reason
+    assert summary["stats"].get("result_failed", 0) == 0 and len(calls) >= 2  # the run went on with the next job
+    assert len([e for e in _events("requeued") if "connection dropped" in e.message]) == 1
+    with session_scope() as s:
+        job = s.scalar(select(Job).where(Job.external_id == state["job"]))
+        assert job.application.attempts == 1 and not job.application.submit_attempted and not job.application.failure_reason
+
+
+@pytest.mark.browser
+async def test_the_third_broken_attempt_is_recorded_as_failed(engine, site_server, clean_db):
+    wrap, _calls, state = _breaks(_offline, times=3)
+    for expected in (JobStatus.QUEUED, JobStatus.QUEUED, JobStatus.FAILED):
+        await _run(engine, site_server, wrap)
+        status, reason = _statuses()[state["job"]]
+        assert status == expected, (status, reason)
+    assert "broke 3 times" in reason and "Retry" in reason  # no endless loop: yours to retry when it is stable
+
+
+@pytest.mark.browser
+async def test_a_connection_lost_after_the_submit_click_is_never_requeued(engine, site_server, clean_db):
+    wrap, _calls, state = _breaks(_offline, after_submit=True)
+    await _run(engine, site_server, wrap)
+    status, _reason = _statuses()[state["job"]]
+    assert status != JobStatus.QUEUED  # something may have been sent: it is not applied to again by itself
+    with session_scope() as s:
+        assert s.scalar(select(Job).where(Job.external_id == state["job"])).application.submit_attempted
+
+
+def test_which_failures_pass_by_themselves():
+    from playwright.async_api import Error as PlaywrightError
+
+    from app.browser.errors import BrowserCrashed, NavigationFailed
+    from app.engine.orchestrator import transient_failure
+
+    assert transient_failure(_offline()) == "the internet connection dropped"
+    assert transient_failure(NavigationFailed("Page.goto: net::ERR_NAME_NOT_RESOLVED")) == "the internet connection dropped"
+    assert transient_failure(BrowserCrashed("gone")) == "the browser window was closed"
+    assert transient_failure(PlaywrightError("Page.wait_for_timeout: Target page, context or browser has been closed")) \
+        == "the browser window was closed"
+    for lasting in (ValueError("bad"), NavigationFailed("Could not load: Page.goto: Timeout 30000ms exceeded."),
+                    RuntimeError("Could not click <Locator>")):
+        assert transient_failure(lasting) == ""

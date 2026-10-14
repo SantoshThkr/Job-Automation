@@ -46,6 +46,23 @@ STOP_KINDS: list[tuple[str, re.Pattern[str], str]] = [
     ("review", re.compile(r"needs your review|awaiting|approve", re.I), "Waiting for your approval before submitting"),
 ]
 _SENSITIVE = {c.value for c in ASK_IF_MISSING} | {Category.SALARY.value}
+# A question that asks you to *decide* something (a preference, a commitment, a legal or pay-related statement) -
+# as opposed to a fact about you that is merely missing from the profile (a date of birth, years with a tool).
+DECISION_MEANING = ("A personal preference or a consequential answer (legal, pay, commitment) that only you can decide - "
+                    "the assistant never decides these for you")
+_DECISION_CATEGORIES = {Category.PREFERENCE.value, Category.LEGAL_DECLARATION.value, Category.VISA.value,
+                        Category.DEMOGRAPHIC.value, Category.SALARY.value}
+_DECISION_WORDS = re.compile(
+    r"\b(?:are\s+you\s+(?:willing|open|comfortable|ok(?:ay)?|fine|happy|ready|able|interested)|would\s+you|will\s+you|"
+    r"do\s+you\s+(?:agree|consent|accept|authori[sz]e|prefer|want|wish|require)|can\s+you\s+(?:join|relocate|work|commit|"
+    r"start|travel)|i\s+(?:agree|consent|certify|acknowledge|confirm|authori[sz]e)|happy\s+with|acceptable|drug\s+test|"
+    r"background\s+(?:check|verification)|sponsorship|relocat\w+|contract\s+(?:role|position)|bond|non[-\s]?compete)\b", re.I)
+
+
+def is_decision(question: str, category: str = "", missing: str = "") -> bool:
+    """The question asks for your decision rather than for a fact (see DECISION_MEANING)."""
+    return (category in _DECISION_CATEGORIES or "work_preferences." in (missing or "")
+            or bool(_DECISION_WORDS.search(question or "")))
 
 
 def classify_stop(reason: str) -> tuple[str, str]:
@@ -157,7 +174,9 @@ def needs_you_items(db: Session, *, include_parked: bool = False) -> list[dict[s
         for qa in pending_questions(job):
             saved = saved_answer(db, qa.question, company=job.company, portal=job.portal, title=job.title)
             check = _profile_check(answerer, qa, job)
+            cat = check.get("category") or qa.category or ""
             questions.append({
+                "decision": is_decision(qa.question, cat, check["missing"]),
                 "id": qa.id, "question": qa.question, "field_type": qa.field_type,
                 "options": choice_labels(qa.options),
                 "required": qa.required, "why": qa.note or "", "category": check.get("category") or qa.category or "",
@@ -168,6 +187,9 @@ def needs_you_items(db: Session, *, include_parked: bool = False) -> list[dict[s
             })
         if questions and kind not in {"questions", "profile"}:
             kind, meaning = "questions", STOP_KINDS[0][2]
+        still_open = [q for q in questions if not q["saved_answer"] and not q["profile_can_answer"]]
+        if kind == "questions" and still_open and all(q["decision"] for q in still_open):
+            kind, meaning = "decision", DECISION_MEANING  # shown as "Needs decision": nothing is missing but your call
         items.append({
             "job_id": job.id, "company": job.company, "title": job.title, "portal": job.portal, "url": job.url,
             "ats": (app.ats_platform if app is not None else "") or "", "status": job.status,

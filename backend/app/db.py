@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 
+from datetime import datetime
+
 from sqlalchemy import MetaData, Table, create_engine, event, func, inspect, literal, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -94,6 +96,8 @@ def init_db() -> None:
     _migrate_answer_memory_scopes(engine)
     Base.metadata.create_all(engine)
     _apply_lightweight_migrations(engine)
+    _backfill_posted_dates(engine)
+    _backfill_posted_precision(engine)
     with session_scope() as s:
         models.AgentState.get(s)
 
@@ -136,6 +140,47 @@ def _migrate_answer_memory_scopes(engine: Engine) -> None:
         if after != before:  # never lose a saved answer: the transaction is rolled back
             raise RuntimeError(f"saved answers migration copied {after} of {before} rows - nothing was changed")
         conn.execute(text("DROP TABLE answer_memory_legacy"))
+
+
+def _backfill_posted_dates(engine: Engine) -> None:
+    """Jobs found before posting dates were recorded keep their listing label ("3 days ago", "3+ weeks ago"). It is
+    turned into a date once - counted from when the job was first found (the earliest moment the label can have
+    been read, so the date errs towards older, never newer). Nothing else changes; the file is copied first."""
+    from app.matching.posting import parse_label
+
+    with engine.begin() as conn:
+        rows = conn.execute(text("SELECT id, posted_text, discovered_at FROM jobs WHERE posted_at IS NULL "
+                                 "AND COALESCE(posted_text, '') != '' AND discovered_at IS NOT NULL")).all()
+    if not rows:
+        return
+    _backup_sqlite(engine, "before-posting-dates")
+    with engine.begin() as conn:
+        for job_id, label, found in rows:
+            seen = found if isinstance(found, datetime) else datetime.fromisoformat(str(found))
+            posted = parse_label(label, seen=seen)
+            if posted is None:
+                continue
+            conn.execute(text("UPDATE jobs SET posted_at = :at, posted_open_ended = :open, posted_date_only = :day, "
+                              "posted_source = 'label', posted_spread_s = :spread WHERE id = :id AND posted_at IS NULL"),
+                         {"at": posted.at, "open": int(posted.open_ended), "day": int(posted.date_only),
+                          "spread": posted.spread_s, "id": job_id})
+
+
+def _backfill_posted_precision(engine: Engine) -> None:
+    """Dates read from a listing's label before its precision was kept get the label's unit ("1 week ago": a week).
+    Nothing else changes; the file is copied first."""
+    from app.matching.posting import label_spread
+
+    with engine.begin() as conn:
+        rows = conn.execute(text("SELECT id, posted_text FROM jobs WHERE posted_at IS NOT NULL AND posted_spread_s IS NULL"
+                                 " AND posted_source = 'label'")).all()
+    if not rows:
+        return
+    _backup_sqlite(engine, "before-posting-precision")
+    with engine.begin() as conn:
+        for job_id, label in rows:
+            conn.execute(text("UPDATE jobs SET posted_spread_s = :s WHERE id = :id AND posted_spread_s IS NULL"),
+                         {"s": label_spread(label or ""), "id": job_id})
 
 
 def _backup_sqlite(engine: Engine, label: str) -> None:

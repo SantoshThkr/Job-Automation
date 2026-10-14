@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { AgentState, Mode, Portal, api } from "@/lib/api";
 import { useAction } from "@/lib/hooks";
 import { MODE_LABEL, PORTAL_LABEL, hostOf, safeHref, timeAgo } from "@/lib/format";
+import { RecencyPicker } from "./RecencyPicker";
 
 const MODES: { value: Mode; hint: string }[] = [
   { value: "dry_run", hint: "Find, score and fill forms - never submits." },
@@ -92,6 +93,10 @@ export function AgentControls({ agent, onChange, defaultPortals }: {
             {PORTAL_LABEL[p]}
           </label>
         ))}
+      </div>
+
+      <div style={{ marginBottom: 14 }}>
+        <RecencyPicker recency={agent?.recency} onChange={onChange} />
       </div>
 
       <div className="row">

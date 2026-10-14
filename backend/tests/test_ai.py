@@ -73,21 +73,31 @@ def test_guard_flags_invented_facts(profile):
 async def test_live_ollama_job_understanding_and_answer(profile):
     from app.config import get_settings
 
+    from app.browser.resources import SWAP_HEADROOM_WARN_MB, memory_state, system_memory
+
     provider = OllamaProvider(base_url="http://localhost:11434", model=get_settings().ollama_model, enabled=True)
     if not await provider.is_available():
         pytest.skip("configured Ollama model not pulled")
+    # This test loads the real model (about 3 GB). It follows the rule a run follows: not under memory pressure and
+    # not without room for it - on 2026-10-13 it pushed a Mac that was already under pressure 1.3 GB further into swap.
+    memory = system_memory()
+    if memory_state(memory)[0] != "ok" or memory.swap_headroom_mb < SWAP_HEADROOM_WARN_MB + get_settings().ai_model_memory_mb:
+        pytest.skip("not enough free memory to load the local model right now (the same rule a run applies)")
     assistant = JobAssistant(provider)
     job = JobInput(title="Senior Frontend Engineer", company="Razorpay", location="Bengaluru",
                    description="Build React + TypeScript dashboards. Requirements: 5+ years React, TypeScript, CSS, "
                                "Jest. Nice to have: Next.js.")
-    u = await assistant.understand_job(profile, job)
-    assert u.is_frontend_role is True
-    assert u.frontend_percentage >= 60
-    assert u.recommendation in {"APPLY", "MANUAL_REVIEW"}
+    try:
+        u = await assistant.understand_job(profile, job)
+        assert u.is_frontend_role is True
+        assert u.frontend_percentage >= 60
+        assert u.recommendation in {"APPLY", "MANUAL_REVIEW"}
 
-    res = await assistant.write_answer(profile, "Why are you interested in this role?", job, max_words=80)
-    assert res.answer and len(res.answer.split()) <= 85
-    assert 0 <= res.confidence <= 1
+        res = await assistant.write_answer(profile, "Why are you interested in this role?", job, max_words=80)
+        assert res.answer and len(res.answer.split()) <= 85
+        assert 0 <= res.confidence <= 1
 
-    fact = await assistant.answer_factual(profile, "What is your passport number?", "text", [], job)
-    assert fact.answer is None or fact.confidence < 0.75  # must not invent a passport number
+        fact = await assistant.answer_factual(profile, "What is your passport number?", "text", [], job)
+        assert fact.answer is None or fact.confidence < 0.75  # must not invent a passport number
+    finally:
+        await provider.unload()  # the model's memory is given back at once, not after its keep-alive

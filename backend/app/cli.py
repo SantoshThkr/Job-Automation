@@ -7,7 +7,8 @@
     python -m app.cli evaluate --title "React Developer" --jd-file jd.txt
     python -m app.cli answer "What is your notice period?"
     python -m app.cli try-apply https://careers.example.com/jobs/123   # navigator on any job page (Dry Run)
-    python -m app.cli reevaluate [--ai] [--dry]   # re-score pending jobs with the current matcher
+    python -m app.cli reevaluate [--ai] [--dry] [--skipped]   # re-score pending (or skipped) jobs with the current matcher
+    python -m app.cli site-login set|list|check|delete [site] [--user NAME]   # sign-ins for employer sites (Keychain)
 """
 
 from __future__ import annotations
@@ -82,10 +83,93 @@ def cmd_check(_a) -> int:
         print("[OK] Employer-site account password set: sign-in"
               + (" and account creation" if st.ats_create_accounts else "") + " handled automatically")
     else:
-        print("[INFO] PJA_ATS_ACCOUNT_PASSWORD not set: you will be asked to sign in on employer career sites")
+        print("[INFO] PJA_ATS_ACCOUNT_PASSWORD not set: no general password for employer career sites")
+    from app import site_logins as credentials
+
+    if credentials.keychain_available():
+        sites = credentials.stored_sites()
+        print(f"[{'OK' if sites else 'INFO'}] Sign-ins stored in the macOS Keychain: "
+              + (", ".join(site for site, _ in sites) if sites else "none (python -m app.cli site-login set <site>)"))
+    else:
+        print("[INFO] Per-site sign-ins (macOS Keychain) are not available or switched off (PJA_SITE_LOGIN_KEYCHAIN)")
+    print(f"[{'OK' if st.google_signin else 'OFF'}] 'Sign in with Google' on career sites: the assistant opens "
+          "Google's page and waits for you there" if st.google_signin else
+          "[OFF] 'Sign in with Google' buttons are left alone (PJA_GOOGLE_SIGNIN=false)")
     print(f"[INFO] Auto Apply waits {st.auto_human_wait_s}s for you before parking a job; notifications "
           f"{'on' if st.notify else 'off'}")
+    level, said = api_port_report(st.api_port)
+    print(f"[{level}] {said}")
     return 0 if ok else 1
+
+
+def port_listeners(port: int) -> list[tuple[str, int, str]]:
+    """(program, pid, address) of everything listening on a TCP port of this machine ([] when it cannot be read)."""
+    import shutil
+    import subprocess
+
+    if not shutil.which("lsof"):
+        return []
+    try:
+        out = subprocess.run(["lsof", "-nP", f"-iTCP:{int(port)}", "-sTCP:LISTEN"], capture_output=True, text=True,  # noqa: S603, S607
+                             timeout=10, check=False).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    seen: dict[tuple[int, str], tuple[str, int, str]] = {}
+    for line in out.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 9 and parts[1].isdigit():
+            address = parts[8]
+            seen.setdefault((int(parts[1]), address), (parts[0], int(parts[1]), address))
+    return list(seen.values())
+
+
+def who_answers(port: int) -> str:
+    """'ours' when the Job Assistant API answers on the loopback address of ``port``, 'other' when something else
+    does, 'none' when nothing does."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    from app.config import SERVICE_NAME
+
+    try:
+        # (a fixed http:// loopback address - no other scheme can be opened here)
+        with urllib.request.urlopen(f"http://127.0.0.1:{int(port)}/api/health", timeout=3) as r:  # noqa: S310  # nosec B310
+            raw = r.read(4096)
+    except urllib.error.HTTPError:
+        return "other"  # something answered - with an error: not this API
+    except OSError:
+        return "none"
+    try:
+        body = json.loads(raw or b"{}")
+    except ValueError:
+        return "other"  # something answered - not in this API's words
+    return "ours" if isinstance(body, dict) and body.get("service") == SERVICE_NAME else "other"
+
+
+def api_port_report(port: int) -> tuple[str, str]:
+    """Is the API port ours alone? (level, sentence) for `check`. A second program listening on it (on 2026-10-13,
+    another project's container on 8000, then this API's port) receives the dashboard's requests whenever this API
+    is not running - the dashboard refuses to talk to it, but nothing works until the API is back."""
+    who = who_answers(port)
+    listeners = port_listeners(port)
+    ours = [x for x in listeners if x[2].startswith(("127.0.0.1:", "[::1]:", "localhost:"))] if who == "ours" else []
+    others = [x for x in listeners if x not in ours]
+    names = ", ".join(sorted({f"{name} (pid {pid}, {address})" for name, pid, address in others}))
+    own_port = ("Give this app a port of its own: set PJA_API_PORT to a free port in .env (the API and the dashboard both read "
+                "it) and restart `make dev`.")
+    if who == "ours" and not others:
+        return "OK", f"API port {port}: the Job Assistant API is answering, and nothing else listens on it"
+    if who == "ours":
+        return "WARN", (f"API port {port} is shared: the Job Assistant API answers on it now, but {names} listens on it "
+                        f"too and would answer in its place whenever this API is stopped. {own_port}")
+    if who == "other":
+        return "WARN", (f"API port {port} is answered by another program" + (f" ({names})" if names else "")
+                        + f", not by the Job Assistant API: the dashboard cannot work like this. Start the API "
+                          f"(make dev). {own_port}")
+    if others:
+        return "WARN", f"API port {port}: the API is not running, and {names} listens on that port. {own_port}"
+    return "INFO", f"API port {port}: the API is not running (start it with: make dev)"
 
 
 _STATE_MESSAGES = {
@@ -126,12 +210,58 @@ async def wait_for_linkedin_login(adapter, engine, timeout_s: int, *, poll_s: fl
     return False, check, history
 
 
+# cookies Google sets for a signed-in browser (names only are ever looked at - never their values)
+GOOGLE_SESSION_COOKIES = frozenset({"SID", "__Secure-1PSID", "__Secure-3PSID", "SAPISID"})
+
+
+def has_google_session(cookie_names) -> bool:
+    return bool(GOOGLE_SESSION_COOKIES & set(cookie_names))
+
+
+async def _login_google(timeout: int) -> int:
+    """Sign in to Google once in the agent's own browser profile, so that "Sign in with Google" on career sites
+    finds your session. Everything on Google's page is done by you; this only opens the page and waits."""
+    from app.browser.engine import BrowserEngine
+
+    engine = BrowserEngine(headless=False)
+    await engine.start()
+
+    async def signed_in() -> bool:
+        return has_google_session(c["name"] for c in await engine.context.cookies("https://accounts.google.com"))
+
+    try:
+        if await signed_in():
+            print(f"The agent's browser is already signed in to Google. The session is kept in {engine.user_data_dir}")
+            return 0
+        await engine.goto("https://accounts.google.com/")
+        print("Sign in to Google in the browser window (password, 2-step verification - all yours; nothing is typed "
+              "for you).")
+        print(f"Waiting up to {timeout} seconds...")
+        loop = asyncio.get_running_loop()
+        end = loop.time() + timeout
+        while loop.time() < end:
+            if await signed_in():
+                print(f"Signed in. The session is kept in {engine.user_data_dir} and reused when a career site "
+                      "offers 'Sign in with Google'.")
+                await asyncio.sleep(2)  # let the browser write the session to the profile
+                return 0
+            await asyncio.sleep(2)
+        print("No Google sign-in was detected in time. If Google refused this browser (\"This browser or app may not be "
+              "secure\"), sign-in with Google cannot be used here: store a sign-in for the site instead "
+              "(python -m app.cli site-login set <site>) or sign in on that site by hand when asked.")
+        return 1
+    finally:
+        await engine.stop()
+
+
 def cmd_login(a) -> int:
     from app.browser.engine import BrowserEngine
     from app.portals.registry import PORTALS, create_adapter
 
+    if a.portal == "google":
+        return asyncio.run(_login_google(a.timeout))
     if a.portal not in PORTALS:
-        print(f"Unknown portal {a.portal}; choose from {', '.join(PORTALS)}")
+        print(f"Unknown portal {a.portal}; choose from {', '.join(PORTALS)} (or 'google')")
         return 2
 
     async def run_linkedin(adapter, engine) -> int:
@@ -353,12 +483,28 @@ def cmd_reevaluate(a) -> int:
     from app.engine.recorder import add_event, save_match, set_status
     from app.matching.analyzer import JobInput
     from app.matching.matcher import JobMatcher
-    from app.matching.rules import title_prescreen
+    from app.matching.rules import decision_reason, title_prescreen
     from app.models import Decision, Job, JobStatus
     from app.profile import get_profile
 
     init_db()
     profile = get_profile()
+    rows: list[dict] | None = [] if a.list else None
+    if a.skipped:
+        # jobs skipped for a hard requirement under other preferences (the run does this by itself at its start)
+        from app.engine.reconsider import reconsider_skipped
+
+        moved = reconsider_skipped(profile, dry=a.dry, changes=rows)
+        for k, v in sorted(moved.items()):
+            print(f"{v:4}  skipped -> {k.replace('_', ' ')}")
+        _print_changes(rows, a.list)
+        print("(dry run: nothing changed)" if a.dry else "Done.")
+        return 0
+    from app.engine.recency import adjust as adjust_for_recency
+    from app.engine.recency import current_window
+
+    window = current_window()
+    print(f"Job recency: {window.label()} (as chosen in the dashboard)")
     matcher = JobMatcher(profile, JobAssistant() if a.ai else None)
     pending = {JobStatus.NEW, JobStatus.QUEUED, JobStatus.REVIEW_PENDING, JobStatus.MANUAL_ACTION_REQUIRED,
                JobStatus.DRY_RUN}
@@ -380,7 +526,8 @@ def cmd_reevaluate(a) -> int:
                     title=job.title, description=job.description, company=job.company, location=job.location,
                     experience_text=job.experience_text, salary_text=job.salary_text, skills=job.skills or [])))
                 decision = Decision(result.decision)
-                why = "; ".join(result.blockers or result.flags or result.reasons[:1])
+                why = decision_reason(result, profile.matching.apply_threshold)
+            decision, why, _age = adjust_for_recency(decision, why, job, window)
             new_status = {Decision.APPLY: JobStatus.QUEUED, Decision.SKIP: JobStatus.SKIPPED,
                           Decision.MANUAL_REVIEW: JobStatus.REVIEW_PENDING}[decision]
             if job.status == JobStatus.DRY_RUN and new_status == JobStatus.QUEUED:
@@ -388,6 +535,8 @@ def cmd_reevaluate(a) -> int:
             key = f"{job.status} -> {new_status}"
             if job.status != new_status or result is not None:
                 changes[key] = changes.get(key, 0) + 1
+            if rows is not None and job.status != new_status:
+                rows.append(change_row(job, str(new_status), why, result, profile))
             if a.dry:
                 continue
             if result is not None:
@@ -397,8 +546,49 @@ def cmd_reevaluate(a) -> int:
                 add_event(s, job.id, "reevaluated", f"Re-evaluated with the current matcher: {decision.value} ({why})"[:1000])
     for k, v in sorted(changes.items()):
         print(f"{v:4}  {k}")
+    _print_changes(rows, a.list)
     print("(dry run: nothing changed)" if a.dry else "Done.")
     return 0
+
+
+def frontend_fit(result, profile) -> str:
+    """Does the role match frontend-focused preferences? 'yes' | 'partly' | 'no' | '?' (from the evaluation)."""
+    if result is None:
+        return "no"  # ruled out by its title alone
+    a = result.analysis or {}
+    cat, ratio = a.get("title_category"), a.get("frontend_ratio")
+    floor = profile.job_preferences.min_frontend_ratio
+    if cat in {"backend", "mobile", "devops", "data", "qa"}:
+        return "no" if ratio is None or ratio < floor else "partly"
+    if ratio is None:
+        return "?"
+    if ratio >= floor:
+        return "yes"
+    return "partly" if ratio >= floor - 0.2 else "no"
+
+
+def change_row(job, proposed: str, why: str, result, profile) -> dict:
+    from app.matching.posting import describe_posted
+
+    return {"job_id": job.id, "portal": job.portal, "company": (job.company or "").replace("\t", " "),
+            "title": (job.title or "").replace("\t", " "), "current": str(job.status), "proposed": proposed,
+            "reason": (why or "").replace("\n", " ").replace("\t", " "), "posted": describe_posted(job),
+            "frontend_fit": frontend_fit(result, profile)}
+
+
+def _print_changes(rows: list[dict] | None, where: str | None) -> None:
+    """Every proposed status change, one tab-separated line each (to the file given with --list, or the screen)."""
+    if rows is None:
+        return
+    head = ["job_id", "portal", "company", "title", "current", "proposed", "reason", "posted", "frontend_fit"]
+    lines = ["\t".join(head)] + ["\t".join(str(r.get(k, "")) for k in head) for r in rows]
+    if where and where != "-":
+        from pathlib import Path
+
+        Path(where).write_text("\n".join(lines) + "\n", encoding="utf-8")
+        print(f"{len(rows)} proposed change(s) written to {where}")
+    else:
+        print("\n".join(lines))
 
 
 _EXP_Q = __import__("re").compile(r"years?|experience|\byoe\b|months?\s+of", __import__("re").I)
@@ -479,6 +669,59 @@ def cmd_attempts(a) -> int:
     return 0
 
 
+def cmd_site_login(a) -> int:
+    """Sign-ins for employer career sites, kept in the macOS Keychain. Passwords are typed into macOS' own prompt:
+    they are never an argument, never printed, never logged."""
+    from app import site_logins as credentials
+    from app.profile import get_profile
+
+    if a.action == "list":
+        sites = credentials.stored_sites()
+        if not sites:
+            print("No sign-in is stored. Add one with: python -m app.cli site-login set <site>")
+        for site, user in sites:
+            print(f"{site:40} {user}")
+        return 0
+    site = credentials.normalize_site(a.site or "")
+    if not site:
+        print("Give the site as a host name, e.g. careers.example.com (or paste the sign-in page's address)")
+        return 2
+    if a.action == "set":
+        try:
+            user = (a.user or "").strip() or get_profile().personal.email
+        except Exception:  # noqa: BLE001 - no profile yet: the user name must be given
+            user = (a.user or "").strip()
+        if not user:
+            print("Give the account's user name: --user you@example.com")
+            return 2
+        print(f"Storing the sign-in for {site} (user name: {user}) in your macOS Keychain.")
+        print("macOS now asks for the password - type it there; it is not shown, logged or passed to this program.")
+        try:
+            status = credentials.store(site, user)
+        except (ValueError, RuntimeError) as exc:
+            print(f"Not stored: {exc}")
+            return 2
+        print("Stored." if status == 0 else "Not stored (the Keychain tool reported an error).")
+        return 0 if status == 0 else 1
+    if a.action == "check":
+        from app.config import get_settings
+
+        found = [key for key, _ in credentials.stored_sites() if key in credentials.site_keys(site)]
+        if found:
+            print(f"A sign-in is stored for {found[0]}: it is used on {site} (sign-in only, never to register).")
+        elif get_settings().ats_account_password:
+            print(f"No sign-in is stored for {site}: the general PJA_ATS_ACCOUNT_PASSWORD would be used with your "
+                  "profile e-mail.")
+        else:
+            print(f"Nothing is configured for {site}: you are asked to sign in there yourself (or with Google, where "
+                  "the site offers it).")
+        return 0
+    if a.action == "delete":
+        print(f"Removed the sign-in for {site}." if credentials.delete(site) else f"No sign-in was stored for {site}.")
+        return 0
+    return 2
+
+
 def cmd_resources(a) -> int:
     """[RESOURCE] samples of a run: run start, every 10 jobs read, before/after each application, run end."""
     from sqlalchemy import select
@@ -509,7 +752,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("init").set_defaults(fn=cmd_init)
     sub.add_parser("check").set_defaults(fn=cmd_check)
     lp = sub.add_parser("login")
-    lp.add_argument("portal", choices=["naukri", "linkedin", "instahyre"])
+    lp.add_argument("portal", choices=["naukri", "linkedin", "instahyre", "google"])
     lp.add_argument("--timeout", type=int, default=600)
     lp.set_defaults(fn=cmd_login)
     rp = sub.add_parser("run")
@@ -547,7 +790,17 @@ def main(argv: list[str] | None = None) -> int:
     rv = sub.add_parser("reevaluate", help="re-score pending jobs with the current matcher")
     rv.add_argument("--ai", action="store_true", help="also ask the local model (slower)")
     rv.add_argument("--dry", action="store_true", help="only show what would change")
+    rv.add_argument("--skipped", action="store_true",
+                    help="look again at recent jobs skipped for a hard requirement under older preferences")
+    rv.add_argument("--list", nargs="?", const="-", default=None, metavar="FILE",
+                    help="also list every proposed change (job, company, role, statuses, reason, posting date, "
+                         "frontend fit) - on the screen, or tab-separated into FILE")
     rv.set_defaults(fn=cmd_reevaluate)
+    sl = sub.add_parser("site-login", help="sign-ins for employer career sites (macOS Keychain)")
+    sl.add_argument("action", choices=["set", "list", "check", "delete"])
+    sl.add_argument("site", nargs="?", default="", help="the site, e.g. careers.example.com")
+    sl.add_argument("--user", default="", help="the account's user name (default: your profile e-mail)")
+    sl.set_defaults(fn=cmd_site_login)
     at = sub.add_parser("attempts", help="what happened in every application of a run")
     at.add_argument("--run", type=int, required=True)
     at.add_argument("--json", action="store_true")
