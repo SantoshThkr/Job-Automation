@@ -166,6 +166,17 @@ async def test_easy_apply_native_dialog_end_to_end(li, engine, profile):
 
 
 @pytestmark_browser
+async def test_the_follow_company_box_is_unticked_whatever_its_id(li, engine, profile):
+    """The 2026 review step ticks 'Follow <company> to stay up to date with their page' on a box without a recognisable
+    id (seen on a prepared application on 2026-10-14): it is found by its label and unticked before the submit."""
+    job = await li.fetch_details(_posting(li.base_url, "4465524751"))
+    ctx = make_ctx(engine, _citizen(profile), job, AgentMode.AUTO, FakeGate(), assistant=_ai_says_not_a_question())
+    res = await li.apply(job, ctx)
+    assert res.outcome == ApplyOutcome.APPLIED, (res.message, res.unresolved)
+    assert (await engine.page.evaluate("() => window.SUBMITTED_DATA"))["ember-cb-412"] is False
+
+
+@pytestmark_browser
 async def test_easy_apply_asks_only_for_unverifiable_work_authorization(li, engine, profile):
     job = await li.fetch_details(_posting(li.base_url))
     gate = FakeGate([answers_by_question({"Work Authorization": "Citizen"})])

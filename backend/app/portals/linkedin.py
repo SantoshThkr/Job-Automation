@@ -137,7 +137,18 @@ _TOP_CARD_AGE_JS = r"""() => {
   }
   return '';
 }"""
-FOLLOW_COMPANY = "input#follow-company-checkbox, input[id*='follow-company']"
+# LinkedIn ticks "Follow <company> to stay up to date with their page" on the review step. It is unticked - found by its
+# id or, in the 2026 dialog where the box has no recognisable id, by its label (on 2026-10-14 the review step of a
+# prepared application still had it ticked). Returns [found, still ticked].
+_UNFOLLOW_JS = r"""(root) => {
+  const label = (e) => ((e.labels && e.labels[0] && e.labels[0].innerText) || e.getAttribute('aria-label') || '').trim();
+  const boxes = Array.from(root.querySelectorAll('input[type="checkbox"]')).filter(e =>
+    /follow-company/i.test(e.id || '') || /^follow\b[\s\S]{1,120}\bstay up to date\b/i.test(label(e)));
+  for (const e of boxes) {
+    if (e.checked) ((e.labels && e.labels[0]) || e.closest('label') || e).click();
+  }
+  return [boxes.length, boxes.filter(e => e.checked).length];
+}"""
 RESUME_CARDS = ".jobs-document-upload-redesign-card__container, .jobs-resume-picker__resume"
 CONTINUE_EXTERNAL = T("continue to company site", css=["[role='dialog'] button.artdeco-button--primary"],
                       text=["Continue", "Continue applying"])
@@ -448,9 +459,11 @@ class LinkedInAdapter(PortalAdapter):
     async def _submit(self, page: Page, modal: Locator, submit: Locator, ctx: ApplyContext,
                       unresolved: list[str]) -> ApplyResult:
         try:
-            follow = modal.locator(FOLLOW_COMPANY)
-            if await follow.count() and await follow.first.is_checked():
-                await follow.first.evaluate("el => (el.closest('label') || document.querySelector('label[for=\"' + el.id + '\"]') || el).click()")
+            found, ticked = await modal.first.evaluate(_UNFOLLOW_JS)
+            if ticked:
+                await ctx.event("follow_company", f"Could not untick 'Follow {ctx.job.company}' - it would follow the company",
+                                level="warning")
+                unresolved = [*unresolved, f"'Follow {ctx.job.company}' is still ticked (untick it before submitting)"]
         except PlaywrightError:
             pass
         decision = await ctx.decide_submit(page, unresolved=unresolved,
