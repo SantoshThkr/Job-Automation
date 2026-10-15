@@ -76,6 +76,10 @@ log = logging.getLogger(__name__)
 AdapterFactory = Callable[[str, BrowserEngine], PortalAdapter | None]
 
 # Statuses that mean "already handled - do not process again during discovery"
+# a portal whose searches keep listing what this run has already seen is not searched further: on 2026-10-15 run 76
+# made 65 Instahyre searches (5 queries x 13 cities) that listed the same few dozen jobs - 1 300 sightings, 1 new job
+REDUNDANT_SEARCHES = 3
+
 _HANDLED = {JobStatus.APPLIED, JobStatus.ALREADY_APPLIED, JobStatus.DUPLICATE, JobStatus.SKIPPED,
             JobStatus.REVIEW_PENDING, JobStatus.MANUAL_ACTION_REQUIRED, JobStatus.DRY_RUN, JobStatus.FAILED,
             JobStatus.AWAITING_APPROVAL, JobStatus.APPLYING, JobStatus.QUEUED, JobStatus.EXPIRED}
@@ -159,6 +163,7 @@ class Orchestrator:
         self.only_jobs: set[int] | None = None
         self.max_searches: int | None = None
         self.search_only = False  # find and evaluate only: the queue is left as it is (for reviewing a portal's yield)
+        self.seen_this_run: set[tuple[str, str]] = set()  # (portal, listing id): unique listings of this run
         self.window: Window = Window()  # job recency, read from the dashboard's choice at the start of every run
 
     # ------------------------------------------------------------ helpers
@@ -219,6 +224,7 @@ class Orchestrator:
         self.stats = Counter()
         self.logged_out = {}  # a new run tries every portal again (you may have logged in meanwhile)
         self.broke_this_run = set()
+        self.seen_this_run = set()
         with session_scope() as s:
             run = Run(mode=self.mode.value, portals=portals)
             s.add(run)
@@ -611,9 +617,17 @@ class Orchestrator:
         search = self.profile.search
         years = self.profile.professional.total_experience_years if search.use_experience_filter else None
         searches = 0
+        redundant = 0  # searches in a row that brought no listing new to this run
         for keywords in search.queries:
             for location in (search.locations or [""]):
                 await self.control.checkpoint()
+                if redundant >= REDUNDANT_SEARCHES:
+                    left = len(search.queries) * len(search.locations or [""]) - searches
+                    self._event(None, "limit", f"{adapter.display_name}: the last {REDUNDANT_SEARCHES} searches listed "
+                                               f"only jobs already seen in this run - its {left} remaining search(es) "
+                                               "are skipped (the portal shows the same listings whatever is asked)")
+                    self.stats["searches_skipped_redundant"] += left
+                    return
                 if self.max_searches is not None and searches >= self.max_searches:
                     self._event(None, "limit", f"{adapter.display_name}: search limited to {self.max_searches} "
                                                "quer" + ("y" if self.max_searches == 1 else "ies") + " for this run")
@@ -629,11 +643,18 @@ class Orchestrator:
                 self.control.activity(f"Searching {label}")
                 self.control.live(job_id=None, step=f"Searching {label}", phase="discovering")  # no stale "current job"
                 self._event(None, "search", f"Searching {label}")
-                found = 0
+                found = fresh = 0
                 try:
                     async for posting in adapter.search(q):
                         found += 1
                         self.stats["discovered"] += 1
+                        key = (posting.portal, posting.external_id)
+                        if key in self.seen_this_run:
+                            self.stats["repeat_sightings"] += 1
+                        else:
+                            self.seen_this_run.add(key)
+                            self.stats["unique_listings"] += 1
+                            fresh += 1
                         if self.stats["discovered"] % 10 == 0:
                             await self._resources("discovery", discovered=self.stats["discovered"])
                         await self.control.checkpoint()
@@ -652,7 +673,8 @@ class Orchestrator:
                     if is_network_error(exc):
                         raise
                     self._event(None, "search_failed", f"{label}: {exc}", level="error")
-                self._event(None, "search_done", f"{label}: {found} job(s) found")
+                self._event(None, "search_done", f"{label}: {found} job(s) found, {fresh} not already seen in this run")
+                redundant = redundant + 1 if found and not fresh else 0
 
     def _mark_error(self, posting: JobPosting, exc: Exception, shot: str | None) -> None:
         with session_scope() as s:
@@ -1101,13 +1123,30 @@ class Orchestrator:
             if state != "critical":
                 return ""
             if waited == 0:
+                released = await self._release_browser_memory()
                 self._event(None, "memory_critical", f"Out of memory: {why}. Waiting up to {settings.memory_wait_s} s "
-                            "for it to recover before the next application (nothing is closed for you).", level="warning")
+                            "for it to recover before the next application" + (
+                                " - the agent's open page was released (sign-ins are kept); nothing of yours is closed"
+                                if released else " (nothing of yours is closed)") + ".", level="warning")
                 self.control.live(step=f"Waiting for memory: {why}"[:200])
             if waited >= settings.memory_wait_s:
                 return why
             await self._sleep(15)
             waited += 15
+
+    async def _release_browser_memory(self) -> bool:
+        """Between two units of work, give back what the agent's own browser holds: the open page (with its embedded
+        frames - a LinkedIn page runs in ~10 renderer processes, ~1.5-2 GB) is replaced by a blank tab. The browser,
+        the profile and every sign-in stay; nothing is in the middle of an application here (the gate runs only
+        between applications and searches)."""
+        if not getattr(self.engine, "alive", False):
+            return False
+        try:
+            await self.engine.fresh_page()
+            return True
+        except Exception as exc:  # noqa: BLE001 - releasing memory is best effort
+            log.debug("releasing the browser page failed: %s", exc)
+            return False
 
     async def _no_room_for_model(self, memory: Any, provider: Any) -> str:
         """'' when the local model may be used; otherwise why not. Loading it takes about 3 GB at once: with less than

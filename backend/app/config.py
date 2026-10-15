@@ -107,6 +107,9 @@ class Settings(BaseSettings):
     reconsider_skipped: bool = True
     ai_model_memory_mb: int = 3200  # what loading the local model takes; it is not loaded with less headroom (0 = no check)
     browser_disk_cache_mb: int = 100  # cap of the agent browser's HTTP cache on disk (0 = Chrome's default)
+    # advertising / marketing tracker frames are not loaded (each ran in a renderer process of its own); CAPTCHA,
+    # bot-protection and sign-in services are never blocked - see browser/engine.py TRACKER_HOSTS
+    browser_block_trackers: bool = True
 
     # Agent
     default_mode: str = "dry_run"

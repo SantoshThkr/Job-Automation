@@ -45,6 +45,10 @@ class JobAnalysis:
     experience_source: str = ""  # "listing" (the portal's experience field) | "description" | ""
     experience_note: str = ""  # set when the listing's field and the rest of the posting disagree
     experience_conflict: bool = False  # the field says junior, the title says senior, the description is silent
+    # the evidence behind frontend_ratio: what the description itself names (frontend_ratio also weighs the title in)
+    frontend_skills: list[str] = field(default_factory=list)
+    backend_skills: list[str] = field(default_factory=list)
+    measured_frontend: float | None = None  # frontend share of the technologies the description names; None: none
 
     def to_dict(self) -> dict:
         return {
@@ -65,6 +69,9 @@ class JobAnalysis:
             "salary_min_lpa": self.salary_min_lpa,
             "salary_max_lpa": self.salary_max_lpa,
             "jd_length": self.jd_length,
+            "frontend_skills": self.frontend_skills,
+            "backend_skills": self.backend_skills,
+            "measured_frontend": None if self.measured_frontend is None else round(self.measured_frontend, 2),
         }
 
 
@@ -72,11 +79,14 @@ class JobAnalysis:
 
 _TITLE_CATEGORIES: list[tuple[str, str]] = [
     ("fullstack", r"full[\s-]?stack|\bmern\b|\bmean\s+stack\b"),
-    ("qa", r"\bqa\b|\bsdet\b|quality\s+(?:assurance|engineer)|\btest(?:ing)?\s+(?:engineer|analyst|lead)\b|\bautomation\s+test|\btester\b"),
+    ("qa", r"\bqa\b|\bsdet\b|quality\s+(?:assurance|engineer)|\btest(?:ing)?\s+(?:engineer|analyst|lead)\b|\bautomation\s+test|\btester\b|"
+           r"engineer\s+in\s+test\b"),
     # ("mobile web" / "mobile-first" is the web, seen on a phone)
     ("mobile", r"\bandroid\b|\bios\b|\bmobile\b(?![\s-]*(?:web|first|responsive|friendly))|\bflutter\b|react[\s-]*native|\bswift\b|\bkotlin\b"),
     ("devops", r"\bdevops\b|\bsre\b|site\s+reliability|\bcloud\s+(?:engineer|architect)\b|\bplatform\s+engineer\b|\binfrastructure\b|\bdevsecops\b"),
-    ("data", r"\bdata\s+(?:scientist|engineer|analyst)\b|machine\s+learning|\bml\s+engineer\b|\bai\s+engineer\b|\banalytics\b|\bbi\s+developer\b"),
+    # ("AI Engineer" is not here: in 2026 it usually means building LLM applications - often a full-stack TypeScript /
+    # Python role - and its description decides. Run 76 skipped twelve of them from the title alone, unread.)
+    ("data", r"\bdata\s+(?:scientist|engineer|analyst)\b|machine\s+learning|\bml\s+engineer\b|\banalytics\b|\bbi\s+developer\b"),
     ("frontend", r"front[\s-]?end|\bui\b|\bux\s+engineer\b|\breact(?:\.?js)?\b|\bangular(?:js)?\b|\bvue(?:\.?js)?\b|\bjavascript\b|\bjs\b|next\.?js|\bweb\s+(?:developer|engineer|ui)\b|\bsvelte\b|\btypescript\b"),
     ("backend", r"back[\s-]?end|\bjava\b(?!\s*script)|\bpython\b|\bgolang\b|\.net\b|\bc#|\bphp\b|\bruby\b|\bnode(?:\.?js)?\b|\bspring\b|\bdjango\b|\bscala\b|\bc\+\+|\bdot\s*net\b|\bserver[\s-]side\b|\bapi\s+developer\b|\bsalesforce\b|\bsap\b|\bmainframe\b"),
 ]
@@ -201,13 +211,38 @@ _FRESHER = re.compile(r"\bfreshers?\b", re.I)
 # "a 25-year legacy", "serving clients for over 15 years"
 _EMPLOYER_YEARS_AFTER = re.compile(r"^\W*(?:of\s+)?(?:industry\s+presence|presence|in\s+(?:business|the\s+(?:industry|market|field))|"
                                    r"legacy|history|excellence|track\s+record|trust|of\s+service|in\s+operation|"
-                                   r"of\s+operations?|old\b)", re.I)
+                                   r"of\s+operations?|old\b|of\s+(?:combined|collective)\b)", re.I)
 _EMPLOYER_YEARS_BEFORE = re.compile(r"(?:compan(?:y|ies)|organi[sz]ation|firm|agency|established|founded|legacy\s+of|"
                                     r"history\s+of|clients?\s+for|customers?\s+for|in\s+business\s+for)[ \t,:-]+(?:[\w+]+[ \t,]+){0,3}$", re.I)
 
 
+# A sentence about the employer that says nothing to the candidate: "Sustainalytics is a Morningstar company dedicated
+# to responsible investment with over 25 years of experience in ESG research" and "For over 20 years, Microsoft and its
+# partners have recommended ALIANDO" were read as "requires 25+ / 20+ years" and skipped (run 76, 2026-10-15).
+_ABOUT_EMPLOYER = re.compile(r"\b(?:compan(?:y|ies)|organi[sz]ations?|firm|agency|founded|established|we|our|us|partners?|"
+                             r"clients?|customers?|recommended|trusted|serv(?:es|ed|ing)|subsidiary|headquartered|"
+                             r"leader|pioneer)\b", re.I)
+_TO_CANDIDATE = re.compile(r"\b(?:you|your|candidates?|applicants?|required|requirements?|must|minimum|min\.?|at\s+least|"
+                           r"should|looking\s+for|seeking|need(?:s|ed)?|ideal(?:ly)?|preferred|qualifications?|hiring|"
+                           r"role|position|job|opening|engineers?|developers?|designers?|architects?|leads?|proven|"
+                           r"hands[\s-]on|(?:we\s+)?expect)\b", re.I)
+
+
+def _sentence(text: str, start: int, end: int) -> str:
+    a = max(text.rfind(c, 0, start) for c in ".!?\n") + 1
+    b = min((i for i in (text.find(c, end) for c in "!?\n") if i != -1), default=len(text))
+    dot = re.search(r"\.(?:\s|$)", text[end:])  # (a decimal point or "Node.js" does not end the sentence)
+    if dot:
+        b = min(b, end + dot.start())
+    return text[a:b]
+
+
 def _about_the_employer(text: str, start: int, end: int) -> bool:
-    return bool(_EMPLOYER_YEARS_AFTER.search(text[end:end + 40]) or _EMPLOYER_YEARS_BEFORE.search(text[max(0, start - 60):start]))
+    if _EMPLOYER_YEARS_AFTER.search(text[end:end + 40]) or _EMPLOYER_YEARS_BEFORE.search(text[max(0, start - 60):start]):
+        return True
+    sentence = _sentence(text, start, end)
+    # (a sentence naming technologies - "8+ years with Node.js and React" - is about your experience)
+    return bool(_ABOUT_EMPLOYER.search(sentence)) and not _TO_CANDIDATE.search(sentence) and not extract_skills(sentence)
 
 
 def parse_experience(text: str) -> tuple[float | None, float | None]:
@@ -467,6 +502,10 @@ def analyze_job(job: JobInput) -> JobAnalysis:
 
     exp_lo, exp_hi, exp_source, exp_note, exp_conflict = posting_experience(job)
 
+    def named(cats: set[str]) -> list[str]:
+        found = [(s, n) for s, n in skills.items() if (d := skill_def(s)) and d.category in cats and not d.signal_only]
+        return [s for s, _n in sorted(found, key=lambda x: (-x[1], x[0]))]
+
     sal_lo, sal_hi = parse_salary_lpa(job.salary_text)
     frameworks = {s for s in skills if (d := skill_def(s)) and d.framework}
 
@@ -488,4 +527,7 @@ def analyze_job(job: JobInput) -> JobAnalysis:
         salary_min_lpa=sal_lo,
         salary_max_lpa=sal_hi,
         jd_length=len(job.description or ""),
+        frontend_skills=named(FRONTEND_CATEGORIES - {"testing"}),
+        backend_skills=named(BACKEND_CATEGORIES | {"fullstack_js"}),
+        measured_frontend=max(0.0, min(1.0, fe / (fe + be))) if fe + be > 0 else None,
     )

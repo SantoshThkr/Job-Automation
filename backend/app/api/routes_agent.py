@@ -227,3 +227,17 @@ def gate(body: GateResponse, db: Session = Depends(get_db)) -> dict[str, Any]:
 def runs(limit: int = Query(20, ge=1, le=100), db: Session = Depends(get_db)) -> list[dict[str, Any]]:
     rows = db.scalars(select(Run).order_by(Run.id.desc()).limit(limit)).all()
     return [run_dict(r) for r in rows]
+
+
+@router.get("/runs/{run_id}/breakdown")
+def run_breakdown(run_id: Annotated[int, Field(ge=1, le=10_000_000)], audit: bool = False,
+                  db: Session = Depends(get_db)) -> dict[str, Any]:
+    """One run, reconciled: sightings vs unique listings vs new records; every decided job once - by outcome, portal,
+    reason code, stage and who decided; with ``audit``, the run's skips judged again by today's rules (read-only)."""
+    from app.engine.run_report import run_breakdown as breakdown
+    from app.profile import get_profile_store
+
+    out = breakdown(db, run_id, audit=audit, profile=get_profile_store().load() if audit else None)
+    if out is None:
+        raise HTTPException(404, "Run not found")
+    return out

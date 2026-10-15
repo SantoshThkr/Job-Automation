@@ -210,6 +210,10 @@ export interface MatchDetails {
   analysis?: Record<string, unknown>;
   ai?: Record<string, unknown> | null;
   resume_id?: string | null;
+  /** structured reasons: a stable code, blocker (never applied to on its score) or flag (yours to decide), the text */
+  codes?: { code: string; kind: "blocker" | "flag"; text: string }[];
+  /** "rules", "rules+ai", with "(uncertain)" when the decision is left to you */
+  decided_by?: string;
 }
 
 export interface JobDetail extends JobSummary {
@@ -335,6 +339,35 @@ export interface JobList {
   recency: Recency & { applied: boolean };
 }
 
+/** One run, reconciled (GET /api/agent/runs/{id}/breakdown). */
+export interface RunBreakdown {
+  run: { id: number; mode: string; status: string; portals: string[] };
+  funnel: {
+    sightings: number;
+    unique_listings: number | null;
+    repeat_sightings: number | null;
+    known_sightings: number;
+    new_records: number;
+    read_again: number;
+    already_applied_on_portal: number;
+    searches_skipped_redundant: number;
+  };
+  discovery: {
+    jobs: number;
+    by_outcome: Record<string, number>;
+    by_portal: Record<string, Record<string, number>>;
+    by_stage: Record<string, number>;
+    decided_by: Record<string, number>;
+    reasons: { outcome: string; code: string; meaning: string; count: number;
+               examples: { id: number; title: string; company: string; portal: string; why: string }[] }[];
+  };
+  queue: Record<string, number>;
+  reconciles: boolean;
+  reconciliation: string;
+  audit?: { skips_checked: number; still_skipped: number; would_apply: number; would_put_to_you: number;
+            would_read_first: number; examples: { id: number; title: string; company: string; now: string }[] };
+}
+
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
     super(message);
@@ -376,6 +409,7 @@ export const api = {
   gate: (response: "approve" | "reject", job_id?: number | null, answers?: Record<string, string>) =>
     post<AgentState>("/api/agent/gate", { response, job_id: job_id ?? null, answers: answers ?? null }),
   runs: (limit = 10) => request<RunItem[]>(`/api/agent/runs?limit=${limit}`),
+  runBreakdown: (id: number, audit = false) => request<RunBreakdown>(`/api/agent/runs/${id}/breakdown${audit ? "?audit=true" : ""}`),
   jobs: (params: Record<string, string | number | boolean | undefined>) => {
     const q = new URLSearchParams();
     Object.entries(params).forEach(([k, v]) => {

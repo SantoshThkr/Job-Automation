@@ -1,9 +1,11 @@
 "use client";
 
 import Link from "next/link";
+import { useState } from "react";
 import { AgentControls } from "@/components/AgentControls";
 import { GateBanner } from "@/components/GateBanner";
 import { JobTable } from "@/components/JobTable";
+import { RunBreakdown } from "@/components/RunBreakdown";
 import { Portal, api } from "@/lib/api";
 import { usePoll } from "@/lib/hooks";
 import { MODE_LABEL, fmtDate, timeAgo } from "@/lib/format";
@@ -38,6 +40,7 @@ export default function DashboardPage() {
   const profile = usePoll(api.profile, 15000);
   const recent = usePoll(() => api.jobs({ applications_only: true, sort: "updated", page_size: 8 }), 5000);
   const runs = usePoll(() => api.runs(8), 10000);
+  const [openRun, setOpenRun] = useState<number | null>(null);
 
   const refreshAll = () => {
     agent.refresh();
@@ -99,7 +102,8 @@ export default function DashboardPage() {
                 <thead><tr><th>Run</th><th>Started</th><th>Mode</th><th>Status</th><th>Result</th></tr></thead>
                 <tbody>
                   {runs.data.map((r) => (
-                    <tr key={r.id}>
+                    <tr key={r.id} className="click" onClick={() => setOpenRun(openRun === r.id ? null : r.id)}
+                        aria-expanded={openRun === r.id} title="Show what this run saw and decided">
                       <td>#{r.id}</td>
                       <td>{fmtDate(r.started_at)}</td>
                       <td>{MODE_LABEL[r.mode] ?? r.mode}</td>
@@ -110,6 +114,7 @@ export default function DashboardPage() {
                 </tbody>
               </table>
             )}
+            {openRun !== null && <RunBreakdown runId={openRun} />}
           </div>
         </div>
         <div className="card" style={{ maxHeight: 760, overflowY: "auto" }}>

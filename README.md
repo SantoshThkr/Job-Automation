@@ -92,6 +92,27 @@ make try URL="https://careers.example.com/jobs/123" MODE=review  # asks you in t
    **When you change your preferences**, recent jobs that were skipped for a hard requirement under the old ones
    are evaluated again at the start of the next run (rules only, nothing is opened): still blocked → stay
    skipped; now relevant → queued; borderline → *Needs decision*. Jobs you skipped yourself are never revisited.
+   **What decides, in order** (every decision carries *reason codes* - `TITLE_EXCLUDED_KEYWORD`, `FRONTEND_SHARE_LOW`,
+   `FULLSTACK_BACKEND_HEAVY`, `FOREIGN_STACK`, `EXPERIENCE_ABOVE`, `CMS_ROLE`, `EMPLOYMENT_TERMS`, `THIN_EVIDENCE`,
+   `TOO_OLD`, `DUPLICATE` ... - each marked *blocker* (never applied to on its score) or *flag* (yours to decide), and
+   *decided by* `rules` or `rules+ai`):
+   * the frontend share quotes the technologies the description names ("frontend: React, CSS; backend/other: Java,
+     Spring Boot", or "the description names no frontend technology");
+   * a full-stack role at 35-50 % frontend whose required backend is in your own skills (Node.js / Express, Python /
+     FastAPI / Flask ...) with React / Next.js / TypeScript / Angular required is accepted; one built on a backend
+     platform you do not list (Java, .NET, Django, Go ...) under 40 % frontend - or a generic title over such a stack
+     under your minimum - is left out;
+   * an "AI Engineer" title is read, not skipped from the title (its description decides);
+   * a CMS site-building role (WordPress, Shopify, Magento, Wix ...) without React / Angular / Vue / TypeScript work is
+     left out, and so is a role customising a vendor platform (ServiceNow, Pega, OutSystems, Workday, Guidewire,
+     Sitecore, AEM, Power Apps ...) that requires no such work - a frontend-titled role on a CMS or platform, or one
+     that also requires React / Angular / TypeScript, is yours to decide; a designer's title, freelance /
+     contract / part-time / hourly / night-shift terms, and a share resting on fewer than three recognisable skills
+     are yours to decide;
+   * years that describe the employer ("a company with over 25 years of experience in ...", "For over 20 years,
+     Microsoft and its partners have recommended ...") are not a requirement.
+   The local model may only settle what the rules could not read (an unclear title, a thin description); it never
+   overrides a blocker or a flag about terms, stacks or seniority.
 5. **Apply, best match first**, within the run/day limits. The resume is chosen per job
    (frontend / frontend+AI / full-stack). The portal flow is used where the portal is the application
    (Naukri chatbot, LinkedIn Easy Apply, Instahyre); anything else continues on the company's site.
@@ -132,6 +153,10 @@ Portal limits:
 | LinkedIn | `f_TPR` (any number of days) | the relative age on the job's top card ("2 days ago", "Reposted 1 week ago"); no structured date on most pages |
 | Instahyre | none (all openings are listed) | the job page's `datePosted` (present on the pages checked); the listing itself shows no date, so jobs found before 2026-10-14 stay undated until they are read again |
 | Company sites (ATS) | - | the listing on the portal that linked to it; the final check also reads the company page's own `datePosted` / `validThrough` when it has them |
+
+A portal that keeps listing what the run has already seen (three searches in a row with nothing new to the run) is
+not searched further in that run - Instahyre's feed lists the same jobs whatever is asked (run 76: 65 searches,
+1 300 sightings, one new job).
 
 A listing that could not be read (its page timed out) or that its portal had paused ("Not currently accepting
 applications") is not set aside for good: when a later search lists it again it is read again, at most once in
@@ -307,6 +332,7 @@ Optional fields left empty are simply asked about (once) when a form requires th
 | `PJA_MEMORY_GUARD` / `PJA_MEMORY_WAIT_S` | `true` / `120` | before each search and each application the run reads the Mac's memory state (kernel pressure level, swap in use, free disk - macOS can only add swap while the startup disk has room). Under pressure it continues **without loading the AI model**; when memory is exhausted it waits, then stops and leaves the remaining jobs queued. Nothing of yours is ever closed. |
 | `PJA_AI_MODEL_MEMORY_MB` | `3200` | what loading the local model takes. With less memory headroom than that (plus a 2 GB margin) the model is **not loaded**: the run goes on with the rules and your saved answers, and says so once. A model that is already in memory stays in use. `0` switches the check off. |
 | `PJA_BROWSER_DISK_CACHE_MB` | `100` | cap of the agent browser's HTTP cache on disk (your sessions are not affected) |
+| `PJA_BROWSER_BLOCK_TRACKERS` | `true` | advertising / marketing tracker frames (DoubleClick, Adobe demdex, ns1p ...) are not loaded in the agent's browser - each cross-site frame runs in a renderer process of its own. CAPTCHA, bot-protection and sign-in services are never blocked. |
 | `PJA_AI_MIN_CONFIDENCE` | `0.75` | answers below this are asked, not guessed |
 | `PJA_AUTO_HUMAN_WAIT_S` | `180` | Auto Apply: wait for you before parking a job (0 = never wait) |
 | `PJA_NOTIFY` | `true` | macOS notifications |
@@ -333,6 +359,11 @@ Search, matching and limits live in `profile.json → search / matching / job_pr
 
 ## 9. Dashboard
 
+* **Run history → a run**: what it saw and decided, reconciled - listing *sightings* (a job listed by two searches
+  counts twice) vs unique listings vs new records; every decided job once, by outcome × portal, stage (title / read /
+  posting date / duplicates), *decided by* (rules / rules + AI), and the rule behind each group with jobs to open;
+  the queue's own outcomes (old queued jobs set aside) separately; *Audit the skips* judges the run's skips again with
+  today's rules (read-only) and counts possible false skips.
 * **Dashboard**: jobs found, relevant, applications, skipped, failed, *needs your attention*, queued,
   today/this week; Start / Pause / Resume / Stop; mode, portals and **Job recency**; the **Now** panel (current job, phase,
   current application step, page); live activity; recent applications; run history.
@@ -399,6 +430,18 @@ The model is the one large, optional cost, so it is the one the run gives up fir
 room for it, it is unloaded 30 seconds after its last use and at the end of a run, and it is paused while macOS
 reports memory pressure. Without it the run uses the rules and your saved answers only (as it does when Ollama is
 not running): written answers and pages the rules do not recognise are left for you.
+
+**Why "16 Chromium processes" with one tab** (measured 2026-10-15): Chrome isolates every cross-site frame in a
+renderer process of its own. One LinkedIn page embeds 7-8 of them - advertising / marketing trackers (DoubleClick,
+Adobe demdex, ns1p), its bot protection (PerimeterX), reCAPTCHA and its own payment frame - so one tab is ~10
+renderers + the browser, GPU and 4 utility processes. The count rises on the first LinkedIn page and then stays flat
+across fresh job tabs: it is not a leak. RSS adds memory those processes share (run 76: 2.6 GB RSS, 1.4 GB actual
+footprint). Tracker frames are kept out (`PJA_BROWSER_BLOCK_TRACKERS`, about one renderer less; their failed frames
+still get an error-page process); security frames are never touched, and site isolation stays on (it separates the
+sites holding your sign-ins). When memory becomes critical between two jobs, the agent first releases its own open
+page (a blank tab in its place: 14 processes / 2.5 GB → 9 / 1.1 GB measured, sign-ins kept), then waits, then stops
+applying with the remaining jobs queued. A stop or pause never lands between the last check and the submit click
+(every click passes the run's checkpoint first).
 
 ## 12. Known limitations
 

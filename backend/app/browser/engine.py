@@ -101,6 +101,21 @@ WIDGET_TEXT = re.compile(r"i'?m\s+not\s+a\s+robot", re.I)  # the label of an inl
 
 CAPTURE_TIMEOUT_S = 8.0  # saving a failed page's source: evidence, never worth waiting on
 
+# Advertising and marketing trackers that LinkedIn and other portals embed as cross-site iframes. Chrome's site isolation
+# runs every cross-site frame in a renderer process of its own: measured on 2026-10-15, one LinkedIn tab = 1 page +
+# 7-8 such frames (DoubleClick x3, Adobe demdex, ns1p, ...) = 10 renderers, ~2.7 GB RSS. They are resolved to "not
+# found" inside this browser only (no request interception, no cost per request). Never listed: CAPTCHA, bot
+# protection, sign-in and payment services (reCAPTCHA / google.com, gstatic, hCaptcha, Cloudflare, PerimeterX /
+# protechts, Arkose, LinkedIn's own hosts) - they are security controls, not overhead.
+TRACKER_HOSTS = ("*.doubleclick.net", "doubleclick.net", "*.demdex.net", "*.ns1p.net", "*.googlesyndication.com",
+                 "*.googleadservices.com", "*.adnxs.com", "*.adsrvr.org", "*.criteo.com", "*.criteo.net",
+                 "*.taboola.com", "*.outbrain.com", "*.scorecardresearch.com", "*.moatads.com")
+
+
+def tracker_block_arg() -> str:
+    return "--host-resolver-rules=" + ", ".join(f"MAP {host} ~NOTFOUND" for host in TRACKER_HOSTS)
+
+
 class BrowserEngine:
     def __init__(self, settings: Settings | None = None, *, headless: bool | None = None,
                  user_data_dir: Path | None = None, checkpoint: Checkpoint | None = None,
@@ -133,6 +148,8 @@ class BrowserEngine:
             self._pw = await async_playwright().start()
         launch_args = ["--disable-blink-features=AutomationControlled", "--no-first-run",
                        "--no-default-browser-check"]
+        if self.settings.browser_block_trackers:
+            launch_args.append(tracker_block_arg())
         if self.persistent and self.settings.browser_disk_cache_mb > 0:
             # the profile keeps your sessions; its HTTP cache only needs to be small (it had grown to 650 MB)
             launch_args.append(f"--disk-cache-size={self.settings.browser_disk_cache_mb * 1048576}")

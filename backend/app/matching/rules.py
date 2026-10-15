@@ -51,7 +51,12 @@ class MatchResult:
     priority: str = ""  # human-readable preference note (React/Next.js first, Angular lower, ...)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        from app.matching.reasons import codes_for, decided_by
+
+        d = asdict(self)
+        d["codes"] = codes_for(self.blockers, self.flags)  # structured: code, blocker | flag, the message
+        d["decided_by"] = decided_by(self)
+        return d
 
 
 def keyword_in(keyword: str, text: str) -> bool:
@@ -126,6 +131,15 @@ def _score_title(profile: Profile, job: JobInput, a: JobAnalysis, ctx: _Ctx) -> 
     return 30.0
 
 
+def share_evidence(a: JobAnalysis) -> str:
+    """What the frontend share rests on, in words: the technologies the description itself names."""
+    if not a.frontend_skills:
+        return ("the description names no frontend technology"
+                + (f" (it names {', '.join(a.backend_skills[:4])})" if a.backend_skills else ""))
+    return (f"frontend: {', '.join(a.frontend_skills[:4])}; "
+            f"backend/other: {', '.join(a.backend_skills[:4]) or 'none named'}")
+
+
 def _score_ratio(profile: Profile, a: JobAnalysis, ctx: _Ctx) -> float:
     ratio = a.frontend_ratio
     min_ratio = profile.job_preferences.min_frontend_ratio
@@ -146,22 +160,22 @@ def _score_ratio(profile: Profile, a: JobAnalysis, ctx: _Ctx) -> float:
         # far below your minimum, measured from the description: not a role to decide about, a role to leave out
         # ("Senior NONMEM Programmer", "Forward Deployed Engineer", "Full Stack Engineer" with a backend description)
         kind = "Backend-heavy full-stack role" if a.title_category == "fullstack" else "Not a frontend role"
-        ctx.blockers.append(f"{kind}: about {pct}% of the description is frontend work (your minimum is "
-                            f"{round(min_ratio * 100)}%)")
+        ctx.blockers.append(f"{kind}: frontend focus ≈ {pct}% (your minimum is {round(min_ratio * 100)}%) - "
+                            f"{share_evidence(a)}")
     if a.title_category in _OTHER_FAMILIES:
         # "Java or Kotlin & React.js Developer", "Node Js Developer", "QA Engineer (React)": the title names another
         # kind of role and merely mentions a frontend technology. Its score alone never applies (61.5 against a
         # threshold of 60 had queued the first): below your minimum it is left out, above it the decision is yours.
         if ratio < min_ratio:
-            ctx.blockers.append(f"Title names a {a.title_category} role and about {pct}% of the description is "
-                                f"frontend work (your minimum is {round(min_ratio * 100)}%)")
+            ctx.blockers.append(f"Title names a {a.title_category} role and the frontend focus is ≈ {pct}% (your "
+                                f"minimum is {round(min_ratio * 100)}%) - {share_evidence(a)}")
         else:
             ctx.flags.append(f"Title names a {a.title_category} role, although the description is mostly frontend "
                              f"work (≈ {pct}%)")
     if a.title_category == "fullstack" and ratio < min_ratio:
-        ctx.flags.append(f"Full-stack role is backend-heavy (frontend ≈ {pct}%)")
+        ctx.flags.append(f"Full-stack role is backend-heavy (frontend ≈ {pct}%; {share_evidence(a)})")
     if a.title_category in {"generic", "other"} and ratio < min_ratio:
-        ctx.flags.append(f"Generic title and frontend share is only ≈ {pct}%")
+        ctx.flags.append(f"Generic title and frontend share is only ≈ {pct}% ({share_evidence(a)})")
     return max(0.0, min(100.0, score))
 
 
@@ -357,10 +371,46 @@ def evaluate_rules(profile: Profile, job: JobInput, analysis: JobAnalysis | None
             ctx.flags.append(f"The description requires {', '.join(skills[:4])} ({family}) - not among your skills")
 
     ratio = a.frontend_ratio
+    mine = set(_profile_skill_map(profile))
+    min_ratio = prefs.min_frontend_ratio
     if a.title_category in {"generic", "other"}:
         heavy_req = sorted(x for x in a.required_skills if x in _HEAVY_BACKEND_SKILLS)
-        if heavy_req and (ratio or 0) < 0.6:
+        not_mine = [x for x in heavy_req if x not in mine]
+        if not_mine and (ratio is None or ratio < min_ratio):
+            # "Software Developer – Unity" (.NET), "Senior Software Engineer" (Java), "Drupal Developer" (PHP): a
+            # generic title over a stack you do not list, and not frontend work - not a decision to put to you
+            ctx.blockers.append(f"Not a frontend role: a generic title whose description centres on "
+                                f"{', '.join(not_mine)} (not among your skills); frontend focus ≈ "
+                                f"{round((ratio or 0) * 100)}% - {share_evidence(a)}")
+        elif heavy_req and (ratio or 0) < 0.6:
             ctx.flags.append(f"Generic title; the description centres on {', '.join(heavy_req)}")
+    if (a.title_category == "fullstack" and not ctx.heavy_stack and ratio is not None
+            and min_ratio - 0.2 <= ratio < min_ratio):
+        # React + Node.js / Python full-stack roles measure 35-50 % frontend: their backend is in your own stack
+        # (listed in your skills, "React + Node.js Developer" among your acceptable titles) - not "backend-heavy"
+        req = set(a.required_skills)
+        if "Node.js" in mine:
+            mine = mine | {"Express"}  # (Node.js's own web layer; heavier frameworks - NestJS - must be yours to count)
+        foreign_req = sorted(s for s in req if s not in mine and (
+            s in _PLATFORMS or ((d := skill_def(s)) is not None and d.category in {"data", "mobile"})))
+        own = sorted(req & _PLATFORMS & mine)
+        core = sorted(req & _FRONTEND_CORE & mine)
+        foreign_platforms = [s for s in foreign_req if s in _PLATFORMS]
+        if foreign_platforms and ratio < min_ratio - 0.1:
+            # clearly backend-leaning (under 40 %) and built on a backend platform you do not list (.NET, Java, Django
+            # ...): left out, like a generic title over the same stack. (40-50 %, nearly balanced: yours to decide.)
+            ctx.flags = [f for f in ctx.flags if not f.startswith("Full-stack role is backend-heavy")]
+            ctx.blockers.append(f"Backend-heavy full-stack role: frontend focus ≈ {round(ratio * 100)}% (your minimum "
+                                f"is {round(min_ratio * 100)}%) and the backend requires {', '.join(foreign_platforms)} "
+                                f"(not among your skills) - {share_evidence(a)}")
+        elif core and own and not foreign_req and ratio >= min_ratio - 0.15:
+            ctx.flags = [f for f in ctx.flags if not f.startswith("Full-stack role is backend-heavy")]
+            ctx.reasons.append(f"Full-stack role whose backend is in your own stack ({', '.join(own)}) with "
+                               f"{', '.join(core)} required: frontend ≈ {round(ratio * 100)}% - accepted")
+        elif foreign_req:
+            ctx.flags = [f"{f[:-1]}; not among your skills: {', '.join(foreign_req[:4])})"
+                         if f.startswith("Full-stack role is backend-heavy") and f.endswith(")") else f for f in ctx.flags]
+    _employment_and_kind(job, a, ctx)
     if ctx.heavy_stack:
         pct = round((ratio or 0) * 100)
         if ratio is None or ratio < 0.6:
@@ -401,6 +451,74 @@ def evaluate_rules(profile: Profile, job: JobInput, analysis: JobAnalysis | None
 
 
 _OTHER_FAMILIES = {"backend", "mobile", "devops", "data", "qa"}  # title categories that are not yours by themselves
+
+# backend languages / frameworks: "the backend is in your own stack" when every one a full-stack role requires is yours
+_PLATFORMS = {".NET", "C++", "Django", "Go", "Hibernate", "Java", "PHP", "Ruby on Rails", "Rust", "Scala", "Spring Boot",
+              "Python", "FastAPI", "Flask", "Node.js", "Express", "NestJS"}
+_FRONTEND_CORE = {"React", "Next.js", "TypeScript", "JavaScript", "Angular"}
+_MODERN_FRONTEND = {"React", "Next.js", "Angular", "Vue", "Svelte", "TypeScript", "Nuxt", "Remix", "Gatsby"}
+_CMS = re.compile(r"\b(word\s?press|shopify|webflow|wix|drupal|joomla|magento|squarespace|elementor)\b", re.I)
+# vendor platforms whose developer roles customise the platform (its scripting, its widgets) rather than build a web
+# frontend - their descriptions name JavaScript, HTML, CSS and often AngularJS, and scored 86-88 as "frontend roles"
+# ("ServiceNow Developer" x2, "Teamcenter AWC Developer" on 2026-10-15; the local model had put them to you)
+_PLATFORM_ROLE = re.compile(r"\b(service\s?now|teamcenter|pega(?:systems)?|appian|outsystems|mendix|power\s?apps|"
+                            r"dynamics\s?365|d365|sitecore|adobe\s+experience\s+manager|\baem\b|liferay|guidewire|"
+                            r"workday|oracle\s+apex|siebel|temenos|sharepoint|opentext|documentum|maximo|adobe\s+msd|"
+                            r"adobe\s+(?:campaign|target|commerce|analytics)|marketo|amazon\s+connect|"
+                            r"oracle\s+integration\s+cloud|oic)\b", re.I)
+# specialist titles your profile does not cover (a blockchain role read as 50 % frontend, game developers queued)
+_SPECIALTY = re.compile(r"\b(blockchain|web3|solidity|smart\s+contracts?|game\s+(?:developer|engineer|programmer)|"
+                        r"unity|unreal|roblox|firmware)\b", re.I)
+# employment terms that are yours to decide (your profile does not say whether you take them)
+_TERMS = [
+    ("freelance", re.compile(r"\bfree[\s-]?lanc(?:e|er|ing)\b", re.I)),
+    ("contract", re.compile(r"\bcontract(?:ual)?\s+(?:role|position|basis|job|opportunity|engagement|to\s+hire)\b|"
+                            r"\b(?:employment|job|work)\s+type\s*[:\-]\s*(?:contract|temporary)\b", re.I)),
+    ("part-time", re.compile(r"\bpart[\s-]time\b", re.I)),
+    ("hourly pay", re.compile(r"(?:\$|usd|₹|inr)\s?\d[\d,]*(?:\.\d+)?\s*(?:/|per)\s*(?:hr|hour|task)\b", re.I)),
+    ("walk-in interview", re.compile(r"\bwalk[\s-]?in\s+(?:drive|interview)s?\b|\bface\s+to\s+face\s+(?:interview|walk[\s-]?in)",
+                                     re.I)),
+    ("night shift / US hours", re.compile(r"\bnight\s+shift\b|\b(?:[6-9]|1[0-2])\s*(?::\d\d)?\s*(?:pm|p\.m\.)\s*(?:to|-|–)\s*"
+                                          r"(?:[1-9]|1[0-2])\s*(?::\d\d)?\s*(?:am|a\.m\.)|\b(?:us|uk|pst|est|cst)\s+"
+                                          r"(?:shift|hours|time\s*zone)\b", re.I)),
+]
+
+
+def _employment_and_kind(job: JobInput, a: JobAnalysis, ctx: _Ctx) -> None:
+    """What the skill share cannot see: a CMS site-building role, a designer's role, terms that are yours to decide,
+    and a share resting on almost no evidence (run 76: a WordPress / Shopify role and a "Freelance Web Designer &
+    Developer" - two skill mentions, "responsive" and "accessibility" - were queued at 76.6 and 84.2)."""
+    text = f"{job.title}\n{job.description or ''}"
+    cms = sorted({m.lower().replace(" ", "") for m in _CMS.findall(text)})
+    if cms and (_CMS.search(job.title or "") or len(_CMS.findall(text)) >= 3):
+        names = ", ".join(n.title() for n in cms)
+        if not set(a.skills) & _MODERN_FRONTEND and a.title_category != "frontend":
+            ctx.blockers.append(f"CMS site-building role ({names}): the description names no React, Angular, Vue or "
+                                "TypeScript work")
+        elif not set(a.skills) & _MODERN_FRONTEND:  # a "Frontend Developer" title over CMS templates: yours to decide
+            ctx.flags.append(f"CMS-centred role ({names}): the description names no React, Angular, Vue or TypeScript "
+                             "work - check that it is the engineering work you want")  # (a frontend title: yours)
+        else:
+            ctx.flags.append(f"CMS-centred role ({names}) - check that it is the engineering work you want")
+    platforms = sorted({re.sub(r"\s+", " ", m.lower()) for m in _PLATFORM_ROLE.findall(text)})
+    if platforms and (_PLATFORM_ROLE.search(job.title or "") or len(_PLATFORM_ROLE.findall(text)) >= 3):
+        names = ", ".join(n.title() for n in platforms)
+        if not set(a.required_skills) & _MODERN_FRONTEND and a.title_category != "frontend":
+            ctx.blockers.append(f"Platform-specific role ({names}): customising a vendor platform - the description "
+                                "requires no React, Angular, Vue or TypeScript work")
+        else:
+            ctx.flags.append(f"Platform-specific role ({names}): customising a vendor platform rather than building a "
+                             "web frontend - yours to decide")
+    if m := _SPECIALTY.search(job.title or ""):
+        ctx.flags.append(f"A specialist role ({m.group(1).title()}) - your profile does not list it; yours to decide")
+    if re.search(r"\bdesigner\b", job.title or "", re.I):
+        ctx.flags.append(f"Title names a design role ('{job.title}') - not a developer role by itself")
+    terms = [name for name, rx in _TERMS if rx.search(text)]
+    if terms:
+        ctx.flags.append(f"Employment terms are yours to decide: {', '.join(terms)}")
+    distinct = [s for s in a.skills if (d := skill_def(s)) is not None and not d.signal_only]
+    if a.title_category != "frontend" and 0 < len(distinct) < 3:
+        ctx.flags.append(f"Few recognizable skills in the job description (only {', '.join(distinct)})")
 
 _HEAVY_BACKEND_SKILLS = {"Java", "Spring Boot", "Hibernate", ".NET", "PHP", "Go", "Ruby on Rails", "Scala", "C++"}
 

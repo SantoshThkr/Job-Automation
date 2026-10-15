@@ -181,7 +181,21 @@ function MatchExplanation({ j }: { j: JobDetail }) {
         ))}
       </div>
       {m.frontend_ratio !== null && m.frontend_ratio !== undefined && (
-        <p className="small">Frontend share of the role: <strong>{Math.round(m.frontend_ratio * 100)}%</strong> · category: {m.category}</p>
+        <p className="small">Frontend share of the role: <strong>{Math.round(m.frontend_ratio * 100)}%</strong> · category: {m.category}
+          {(() => {
+            const a = (m.analysis ?? {}) as { frontend_skills?: string[]; backend_skills?: string[] };
+            return a.frontend_skills || a.backend_skills ? (
+              <span className="muted"> · the description names {a.frontend_skills?.length ? `frontend: ${a.frontend_skills.slice(0, 5).join(", ")}` : "no frontend technology"}
+                {a.backend_skills?.length ? `; backend/other: ${a.backend_skills.slice(0, 5).join(", ")}` : ""}</span>
+            ) : null;
+          })()}
+        </p>
+      )}
+      {m.decided_by && <p className="small" data-testid="decided-by">Decided by: <strong>{m.decided_by}</strong></p>}
+      {!!m.codes?.length && (
+        <div className="chips" data-testid="reason-codes" style={{ marginBottom: 8 }}>
+          {m.codes.map((c, i) => <span key={`${c.code}-${i}`} className={`chip ${c.kind === "blocker" ? "miss" : ""}`} title={c.text}>{c.kind}: {c.code}</span>)}
+        </div>
       )}
       {!!m.blockers?.length && <><h3 className="lvl-error">Blockers</h3><ul className="list small">{uniqueStrings(m.blockers).map((b) => <li key={b}>{b}</li>)}</ul></>}
       {!!m.flags?.length && <><h3 className="lvl-warning">Needs a human look</h3><ul className="list small">{uniqueStrings(m.flags).map((b) => <li key={b}>{b}</li>)}</ul></>}

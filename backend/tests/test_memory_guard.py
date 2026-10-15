@@ -425,3 +425,47 @@ def test_the_model_memory_probe_only_talks_to_a_web_address(monkeypatch):
     monkeypatch.setattr(resources.urllib.request, "urlopen", lambda url, **kw: opened.append(url))
     assert resources.ai_model_mb("file:///etc/passwd") == 0.0 and resources.ai_model_mb("") == 0.0
     assert resources.ai_model_mb("ftp://127.0.0.1/x") == 0.0 and opened == []
+
+
+async def test_out_of_memory_releases_the_agents_own_page_first(orch, monkeypatch):
+    """Measured 2026-10-15: one LinkedIn tab runs in ~10 renderer processes (its cross-site frames are isolated); a
+    blank tab in its place took the agent browser from 14 processes / 2.5 GB to 9 / 1.1 GB, sign-ins kept."""
+    released: list[str] = []
+
+    class Alive:
+        alive = True
+        user_data_dir = "/nonexistent"
+
+        async def fresh_page(self):
+            released.append("blank tab")
+
+    orch.engine = Alive()
+    _states(monkeypatch, CRITICAL, OK)
+    assert await orch._memory_gate() == ""
+    assert released == ["blank tab"]  # once, before waiting - not on every check
+    said = _events("memory_critical")
+    assert len(said) == 1 and "open page was released (sign-ins are kept)" in said[0].message
+
+
+async def test_releasing_never_breaks_the_wait(orch, monkeypatch):
+    class Broken:
+        alive = True
+        user_data_dir = "/nonexistent"
+
+        async def fresh_page(self):
+            raise RuntimeError("browser gone")
+
+    orch.engine = Broken()
+    _states(monkeypatch, CRITICAL, OK)
+    assert await orch._memory_gate() == ""
+    assert "nothing of yours is closed" in _events("memory_critical")[0].message
+
+
+def test_only_advertising_trackers_are_kept_out_never_security_or_sign_in():
+    from app.browser.engine import TRACKER_HOSTS, tracker_block_arg
+
+    arg = tracker_block_arg()
+    assert arg.startswith("--host-resolver-rules=") and "MAP *.doubleclick.net ~NOTFOUND" in arg
+    for host in ("google.com", "gstatic", "recaptcha", "hcaptcha", "cloudflare", "protechts", "perimeterx", "arkose",
+                 "linkedin", "naukri", "instahyre", "licdn", "accounts."):
+        assert not any(host in h for h in TRACKER_HOSTS), host
