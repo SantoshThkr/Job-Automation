@@ -210,7 +210,8 @@ export interface MatchDetails {
   analysis?: Record<string, unknown>;
   ai?: Record<string, unknown> | null;
   resume_id?: string | null;
-  resume_comparison?: {id: string; source: string; matched: string[]; matched_required: string[]}[];
+  resume_comparison_recomputed?: boolean;
+  resume_comparison?: {id: string; source: string; coverage_pct?: number; matched: string[]; matched_required: string[]}[];
   /** structured reasons: a stable code, blocker (never applied to on its score) or flag (yours to decide), the text */
   codes?: { code: string; kind: "blocker" | "flag"; text: string }[];
   /** "rules", "rules+ai", with "(uncertain)" when the decision is left to you */
@@ -218,6 +219,8 @@ export interface MatchDetails {
 }
 
 export interface JobDetail extends JobSummary {
+  processing_stage?: string;
+  next_action?: string;
   external_id: string;
   experience_text: string;
   salary_text: string;

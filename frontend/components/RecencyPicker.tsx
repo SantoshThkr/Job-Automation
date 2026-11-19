@@ -5,7 +5,7 @@ import { Recency, RecencyChoice, api } from "@/lib/api";
 import { useAction } from "@/lib/hooks";
 import { localDay, recencyOption } from "@/lib/format";
 
-const DEFAULT_CHOICES = [1, 3, 7, 14, 30, 60, 90];
+const DEFAULT_CHOICES = [1, 3, 7, 14, 15, 30, 60, 90];
 
 /** The select's value for a stored window: "7", "custom" or "all". */
 export function recencyValue(r: Recency | null | undefined): string {

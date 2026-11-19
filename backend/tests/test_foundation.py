@@ -171,3 +171,12 @@ def test_no_source_file_is_hidden_from_git_by_an_ignore_rule():
     out = subprocess.run(["git", "check-ignore", "--stdin"], input="\n".join(sources), capture_output=True, text=True,
                          cwd=root, check=False)
     assert out.stdout.split() == [], f"ignored by .gitignore: {out.stdout.split()}"
+
+
+def test_detail_distinguishes_navigation_failures_and_uncertain_submissions():
+    from types import SimpleNamespace
+    from app.api.serializers import _processing_stage
+    j = SimpleNamespace(status="FAILED", status_reason="NavigationFailed: Could not load job page", application=None)
+    assert _processing_stage(j)[0] == "APPLICATION_BLOCKED"
+    j.application = SimpleNamespace(submit_attempted=True, confirmed=False)
+    assert _processing_stage(j)[0] == "SUBMISSION_UNVERIFIED"

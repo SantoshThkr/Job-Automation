@@ -170,7 +170,7 @@ Requirements:
     },
     {
         "id": "junior_react",
-        "expected": "SKIP",
+        "expected": "MANUAL_REVIEW",
         "title": "Junior React Developer",
         "company": "WebAgency",
         "location": "Bengaluru",

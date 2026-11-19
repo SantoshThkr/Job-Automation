@@ -33,6 +33,7 @@ def answerer(profile):
     ("What is your email address?", "text", None, "asha.verma.dev@gmail.com"),
     ("LinkedIn Profile", "url", None, "https://www.linkedin.com/in/asha-verma-dev"),
     ("Current City", "text", None, "Bengaluru"),
+    ("Location is Bengaluru, and work from office everyday, are you okay with it ?", "text", None, "Yes"),
     ("How many years of total experience do you have?", "number", None, "7"),
     ("Total Experience (in months)", "number", None, "84"),
     ("How many years of work experience do you have with React?", "number", None, "6"),

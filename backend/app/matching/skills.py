@@ -106,6 +106,9 @@ _SKILLS: list[SkillDef] = [
     SkillDef("Agile", "general", r"\bagile\b|\bscrum\b|\bjira\b", 0.1),
     SkillDef("WebSockets", "general", r"\bweb\s?sockets?\b|\bsocket\.io\b", 0.3),
     # --- DevOps / cloud --------------------------------------------------
+    SkillDef("Supabase", "backend", r"\bsupabase\b", 1.0),
+    SkillDef("Amazon QuickSight", "data", r"\b(?:amazon\s+)?quicksight\b", 1.0),
+    SkillDef("Kiro", "general", r"\bkiro\b", 0.4),
     SkillDef("AWS", "devops", r"\baws\b|\bamazon\s+web\s+services\b|\blambda\b|\bec2\b|\bs3\b", 0.6),
     SkillDef("Azure", "devops", r"\bazure\b", 0.6),
     SkillDef("GCP", "devops", r"\bgcp\b|\bgoogle\s+cloud\b", 0.6),

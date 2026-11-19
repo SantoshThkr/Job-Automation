@@ -156,7 +156,7 @@ def test_senior_title_with_a_junior_field_and_a_silent_description_is_yours_to_d
 def test_advertised_range_is_weighted_and_an_explicit_junior_role_is_excluded(profile, title, description, experience):
     r = rules(profile, title, description=description, experience=experience)
     if title.startswith("Junior"):
-        assert r.decision == "SKIP" and any(b.startswith("Role targets") for b in r.blockers)
+        assert r.decision == "MANUAL_REVIEW" and not r.blockers
     else:
         assert r.decision == "APPLY" and not r.blockers
 
@@ -222,7 +222,7 @@ def test_jobs_skipped_for_their_city_are_queued_once_the_city_is_in_your_prefere
             "elsewhere": _skipped(s, 6, "React Developer", location="Kolkata",
                                   reason="Location 'Kolkata' is not in your preferred locations").id,
             "title_only": _skipped(s, 7, "UI Engineer", reason=where, description="").id,
-            "excluded": _skipped(s, 8, "Java Developer", reason="Title contains excluded keyword 'java developer'").id,
+            "excluded": _skipped(s, 8, "Java Developer", description=BACKEND_JD, reason="Title contains excluded keyword 'java developer'").id,
         }
     with session_scope() as s:  # every one of them was decided with today's preferences
         for j in s.scalars(select(Job)):
@@ -510,3 +510,50 @@ def test_score_only_review_explains_threshold_and_weakest_components(profile):
     assert result.decision == "MANUAL_REVIEW" and not result.flags
     reason = decision_reason(result, 100)
     assert "automatic threshold 100" in reason and "experience" in reason
+
+
+def test_backend_alternatives_require_only_one_but_lists_without_or_stay_required(profile):
+    profile.skills.secondary += ["Python", "Node.js"]
+    jd = "Requirements:\nBackend Development: Python, Node.js, Java, or similar backend technologies.\nReact, Redux"
+    assert "Java" not in rules(profile, "Full Stack Engineer", description=jd).missing_skills
+    assert "Java" in rules(profile, "Full Stack Engineer", description=jd.replace(", or similar backend technologies", "")).missing_skills
+
+
+def test_java_title_gets_read_and_supported_fullstack_duties_do_not_force_review(profile):
+    assert not title_prescreen(profile, "Senior Java Developer")
+    profile.skills.secondary += ["Node.js"]
+    jd = ("Responsibilities\nBuild React interfaces.\nDevelop backend services and APIs using Node.js.\n"
+          "Integrate frontend and backend components.\nManage databases.\nRequired Skills\nReact, Node.js, JavaScript")
+    assert not any("backend or infrastructure duties" in f for f in rules(profile, "Full Stack Developer", description=jd).flags)
+    assert any("JIRA" in f for f in rules(profile, "Full Stack Developer", description=jd+"\nUse of JIRA is a must.").flags)
+
+
+def test_documented_frontend_duties_can_resolve_a_stack_neutral_description(profile):
+    profile.skills.primary.append("Web Performance")
+    jd = ("Strong frontend engineering skills with experience building scalable, high-performance applications. "
+          "Ability to independently own features from concept to production. Product company experience preferred.")
+    assert rules(profile, "Senior Frontend Engineer", description=jd, experience="3-5 years").decision == "APPLY"
+    assert rules(profile, "Fractional Lead GTM Engineer", description="Build outbound into enterprise accounts.").decision == "SKIP"
+
+
+def test_explicit_authorization_is_distinct_from_relocation(profile):
+    profile.work_preferences.willing_to_relocate = True
+    profile.work_preferences.authorized_countries = ["India"]
+    jd = FRONTEND_JD + "\nApplicants must be legally authorized to work in the United States."
+    r = rules(profile, "React Developer", description=jd, location="Remote")
+    assert r.decision == "SKIP" and any("authorization in United States" in b for b in r.blockers)
+    profile.work_preferences.authorized_countries.append("USA")
+    assert rules(profile, "React Developer", description=jd, location="Remote").decision == "APPLY"
+
+
+@pytest.mark.parametrize("card, declaration", [
+    ("2905757-Lead Assistant Manager", "OverviewThe Full Stack Developer will be responsible for web applications."),
+    ("Senior Software Engineer (Node.js)", "We are seeking a versatile and highly skilled Full Stack Engineer."),
+])
+def test_declared_fullstack_role_is_evaluated_using_actual_duties(profile, card, declaration):
+    profile.skills.secondary += ["Python", "Node.js", "FastAPI"]
+    jd = declaration + ("\nResponsibilities\nBuild responsive user interfaces with React. Develop backend APIs.\n"
+                        "Required Skills\nReact, TypeScript\nExperience with Python (FastAPI, Flask, Django) or Node.js.")
+    r = rules(profile, card, description=jd)
+    assert r.decision == "APPLY" and "Django" not in r.missing_skills
+    assert any(card in s and "posting identifies" in s for s in r.reasons)

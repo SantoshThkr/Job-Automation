@@ -120,7 +120,8 @@ class InstahyreAdapter(PortalAdapter):
         params: dict[str, str | int] = {"skills": q.keywords, "search": "true"}
         if re.search(r"\b(?:full[ -]?stack|mern)\b", q.keywords, re.I):
             params["skills"] = ("MERN" if "mern" in q.keywords.lower() else "Generative AI"
-                                if re.search(r"\bai\b", q.keywords, re.I) else "React")
+                                if re.search(r"\bai\b", q.keywords, re.I) else "FastAPI" if "fastapi" in q.keywords.lower()
+                                else "Python" if "python" in q.keywords.lower() else "React")
         else:
             params["job_functions"] = "/api/v1/job_function/3"
         if q.location:

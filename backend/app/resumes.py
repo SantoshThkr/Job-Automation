@@ -50,7 +50,10 @@ def _document_skills(path: Path, modified_ns: int, size: int) -> frozenset[str] 
         reader = PdfReader(path)
         listed = set()
         for page in reader.pages:
-            for line in (page.extract_text() or "").splitlines():
+            # PDF text wraps skill lists across lines. Join comma continuations before
+            # interpreting headings, including parenthetical integration-only examples.
+            text = re.sub(r",[^\S\n]*\n\s*(?!\n)", ", ", page.extract_text() or "")
+            for line in text.splitlines():
                 heading, colon, items = line.strip().partition(":")
                 if colon and re.fullmatch(r"front[ -]?end|back[ -]?end(?:/integration)?|generative ai|databases|"
                                           r"cloud\s*&\s*devops|testing\s*&\s*(?:quality|practices)|"
@@ -87,7 +90,8 @@ def rank_resumes(profile: Profile, category: str, skills: list[str], required: l
                   (resume.id, resume.label, *resume.tags)]
         family_match = bool(family and any(re.search(r"\b" + re.escape(family) + r"\b", t) for t in labels))
         score = len(matched) + 2 * len(matched_required) + 4 * family_match
-        ranked.append({"id": resume.id, "score": score, "matched": matched, "matched_required": matched_required,
+        ranked.append({"id": resume.id, "score": score, "coverage_pct": round(100 * (len(matched) + 2 * len(matched_required)) /
+                           max(1, len(wanted) + 2 * len(mandatory))), "matched": matched, "matched_required": matched_required,
                        "source": "PDF and tags" if document else "configured tags", "default": resume.default,
                        "category_match": family_match, "designated": resume.id.casefold() == family})
     return sorted(ranked, key=lambda r: (r["score"], r["designated"], r["default"]), reverse=True)

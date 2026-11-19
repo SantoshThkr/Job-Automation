@@ -1314,7 +1314,7 @@ def h_location_ok(ctx, p, q):
     """'Are you okay with the office location, Pune?' / 'Locations: Bangalore, Pune, Noida' (Yes / No): yes when one
     of the cities is where you live or prefer to work, else your willingness to relocate."""
     if not (_wants_yes_no(ctx) or (ctx.field_type in {"text", "textarea"} and not ctx.options
-                                   and _YES_NO_QUESTION.search(q))):  # "Are you open for Mumbai location?" in a text box
+                                   and (_YES_NO_QUESTION.search(q) or re.search(r"\bare you (?:ok(?:ay)?|comfortable) with (?:it|that|this)\b", q)))):  # compound office-location question in a text box
         return None
     cities = [c for c in parse_locations(q) if c not in {"remote", "anywhere"}]
     if not cities:

@@ -134,7 +134,7 @@ class JobAssistant:
             "accepts_fullstack": p.job_preferences.accept_fullstack,
         }
         system = ("You are a precise technical recruiter. You judge how well a job fits a frontend-focused "
-                  "candidate. Answer ONLY with a JSON object matching the requested fields.")
+                  "candidate who also accepts full-stack and AI application engineering. Treat preferred skills and alternatives as such. Cite job evidence for concerns. Answer ONLY with a JSON object matching the requested fields.")
         prompt = (
             f"CANDIDATE:\n{json.dumps(candidate, ensure_ascii=False)}\n\nJOB:\n{_job_block(job)}\n\n"
             "Return JSON with:\n"

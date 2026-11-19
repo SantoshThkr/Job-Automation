@@ -113,7 +113,7 @@ class JobMatcher:
             elif decisive and u.recommendation == "APPLY" and not (readable and frontend_enough):
                 info["note"] = "the model's 'apply' was not followed: the rules measured a reason for your review"
             elif decisive and u.recommendation == "SKIP" and result.score < m.apply_threshold:
-                result.decision = Decision.SKIP.value
+                result.flags.append(f"Local model recommends review of fit: {u.summary}")
         elif before == Decision.SKIP:
             if result.score >= m.skip_threshold and u.recommendation != "SKIP":
                 result.decision = Decision.MANUAL_REVIEW.value

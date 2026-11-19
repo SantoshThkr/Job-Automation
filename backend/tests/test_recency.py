@@ -559,7 +559,7 @@ def test_the_default_is_the_last_seven_days(client):
     _window({})
     r = client.get("/api/agent").json()["recency"]
     assert r["days"] == 7 and r["chosen"] is False and r["label"] == "posted in the last 7 days"
-    assert r["choices"] == [1, 3, 7, 14, 30, 60, 90]
+    assert r["choices"] == [1, 3, 7, 14, 15, 30, 60, 90]
     assert recency_mod.current_window() == Window(days=7)
 
 

@@ -194,7 +194,7 @@ class Window:
 
 
 DEFAULT_DAYS = 7
-CHOICES = (1, 3, 7, 14, 30, 60, 90)  # the dashboard's "last N days" options
+CHOICES = (1, 3, 7, 14, 15, 30, 60, 90)  # the dashboard's "last N days" options
 
 
 def window_from(stored: dict | None) -> Window:

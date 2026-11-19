@@ -473,10 +473,12 @@ class LinkedInAdapter(PortalAdapter):
 
     async def _need_human(self, page: Page, ctx: ApplyContext, problems: list[str],
                           all_unresolved: list[str]) -> ApplyResult | None:
+        all_unresolved = list(dict.fromkeys([*all_unresolved, *problems]))
         if ctx.mode.value == "dry_run":
             await ctx.event("dry_run", "Dry run stopped at a step with questions needing review", unresolved=problems)
             await self._discard(page)
-            return ApplyResult(ApplyOutcome.DRY_RUN, "Dry run: questions need review", unresolved=all_unresolved)
+            return ApplyResult(ApplyOutcome.DRY_RUN, "Dry run: questions need review - " + "; ".join(problems[:5]),
+                               unresolved=all_unresolved)
         res = await ctx.wait_for_human("manual", "Please answer in the LinkedIn dialog, then press Continue: "
                                        + "; ".join(problems[:5]), page=page)
         if res in (GateResult.RESOLVED, GateResult.APPROVE):

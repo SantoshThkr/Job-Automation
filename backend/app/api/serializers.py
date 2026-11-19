@@ -95,9 +95,45 @@ def application_dict(app: Application | None) -> dict[str, Any] | None:
     }
 
 
+def _processing_stage(job: Job) -> tuple[str, str]:
+    app = job.application
+    status = str(job.status)
+    if app and app.submit_attempted and not app.confirmed and status not in {"APPLIED", "ALREADY_APPLIED"}:
+        return "SUBMISSION_UNVERIFIED", "Check the portal application history before retrying."
+    if status == "SKIPPED" and ((job.match_details or {}).get("recency_skip") or
+            "outside your job-recency window" in (job.status_reason or "")):
+        return "EXCLUDED_BY_DATE", "Check the recorded posting date against the selected window."
+    if status == "FAILED" and any(term in (job.status_reason or "").lower() for term in (
+            "navigationfailed", "could not load", "timeout", "login", "session expired")):
+        return "APPLICATION_BLOCKED", "Restore navigation or the portal session, then retry before submission."
+    if status == "FAILED":
+        return "APPLICATION_FAILED", "Inspect the failed step and its recorded error before retrying."
+    if status == "MANUAL_ACTION_REQUIRED":
+        return "APPLICATION_BLOCKED", "Resolve the recorded form, login or portal issue before continuing."
+    if status == "REVIEW_PENDING":
+        return status, "Check the evidence named in the review reason, then approve or skip."
+    if status == "QUEUED":
+        return status, "Ready for the application worker, subject to its date and duplicate checks."
+    if status in {"APPLIED", "ALREADY_APPLIED", "DUPLICATE", "EXPIRED", "SKIPPED"}:
+        return status, "No further application action."
+    return status, job.status_reason or "Inspect the job timeline."
+
+
 def job_detail(job: Job, window=None) -> dict[str, Any]:
     d = job_summary(job, window)
+    details = dict(job.match_details or {})
+    if job.description and not all("coverage_pct" in r for r in (details.get("resume_comparison") or [{}])):
+        from app.matching.analyzer import JobInput, analyze_job
+        from app.profile import get_profile
+        from app.resumes import rank_resumes
+
+        analysis = analyze_job(JobInput(job.title, job.description, skills=job.skills or []))
+        details["resume_comparison"] = rank_resumes(get_profile(), details.get("resume_category") or analysis.title_category,
+                                                    list(analysis.skills), sorted(analysis.required_skills))
+        details["resume_comparison_recomputed"] = True
+    stage, action = _processing_stage(job)
     d.update({
+        "processing_stage": stage, "next_action": action,
         "external_id": job.external_id,
         "experience_text": job.experience_text,
         "salary_text": job.salary_text,
@@ -106,7 +142,7 @@ def job_detail(job: Job, window=None) -> dict[str, Any]:
         "skills": job.skills or [],
         "external_url": job.external_url,
         "search_query": job.search_query,
-        "match_details": job.match_details or {},
+        "match_details": details,
         "evaluated_at": iso(job.evaluated_at),
         "application": application_dict(job.application),
         "events": [event_dict(e) for e in job.events],

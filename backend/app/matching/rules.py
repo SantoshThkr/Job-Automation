@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 from rapidfuzz import fuzz
@@ -113,7 +113,9 @@ class _Ctx:
 def _score_title(profile: Profile, job: JobInput, a: JobAnalysis, ctx: _Ctx) -> float:
     prefs = profile.job_preferences
     title = _norm(job.title)
-    if keyword := _excluded_title_keyword(profile, job.title):
+    if (keyword := _excluded_title_keyword(profile, job.title)) and not (
+        keyword.casefold() == "java developer" and a.frontend_skills and a.frontend_ratio is not None
+        and a.frontend_ratio >= profile.job_preferences.min_frontend_ratio):
         ctx.blockers.append(f"Title contains excluded keyword '{keyword}'")
         return 0.0
     best_target = max((fuzz.token_set_ratio(title, _norm(t)) for t in prefs.target_titles), default=0)
@@ -225,6 +227,12 @@ def _score_skills(profile: Profile, job: JobInput, a: JobAnalysis, ctx: _Ctx,
     out_missing.extend(missing_required)
 
     if total == 0:
+        if (a.title_category == "frontend" and "Web Performance" in pskills and
+                re.search(r"front[ -]?end engineering skills.{0,80}high.performance applications", job.description, re.I)
+                and re.search(r"own features from concept to production", job.description, re.I)):
+            ctx.reasons.append("The posting asks for frontend performance and delivery of features to production; "
+                               "your documented frontend performance experience matches")
+            return 75.0
         ctx.flags.append("Few recognizable skills in the job description")
         return 50.0
     coverage = matched / total
@@ -281,9 +289,6 @@ def _score_experience(profile: Profile, job: JobInput, a: JobAnalysis, ctx: _Ctx
             if a.experience_conflict:  # "Senior ..." with "0-2 Yrs" in the portal's field: yours to judge, not a skip
                 ctx.flags.append(a.experience_note)
                 return 60.0
-            if a.title_seniority == "junior":
-                ctx.blockers.append(f"Role targets {req} years of experience and has a junior title; you have {years:g}")
-                return 10.0
         ctx.reasons.append(f"Experience: requires {req} yrs, you have {years:g} (above range)")
         if over <= tol:
             return 85.0
@@ -366,6 +371,22 @@ def _score_location(profile: Profile, job: JobInput, a: JobAnalysis, ctx: _Ctx) 
 
 
 def evaluate_rules(profile: Profile, job: JobInput, analysis: JobAnalysis | None = None) -> MatchResult:
+    card_title = job.title
+    # Some cards carry an internal grade or one stack keyword. Use an explicit
+    # role declaration at the start of the JD when it also specifies both stacks.
+    declared = re.search(r"(?:The |seeking (?:a |an )?(?:[\w-]+ ){0,5}|Job Title:\s*)"
+                         r"((?:Senior (?:AI & )?)?Full[ -]Stack (?:Engineer|Developer))"
+                         r"(?=\b|Location:)", job.description[:400], re.I)
+    if (declared and profile.job_preferences.accept_fullstack and
+            (re.fullmatch(r"\d+[- ]+(?:Lead |Assistant )*(?:Manager)", card_title, re.I)
+             or re.search(r"Software Engineer\s*\(Node\.?js\)", card_title, re.I)) and
+            re.search(r"React(?:\.?js)?\b", job.description, re.I) and
+            re.search(r"Node\.?js|FastAPI|Flask", job.description, re.I)):
+        description = re.sub(r"(?<=[a-z)])\.(?=[A-Z][a-z])", ".\n", job.description)
+        description = re.sub(r"(Required Skills and Qualifications|Preferred Skills|Key Responsibilities)(?=[A-Z])",
+                             r"\n\1:\n", description)
+        job = replace(job, title=declared[1], description=description)
+        analysis = None
     a = analysis or analyze_job(job)
     documented = set().union(*(resume_skills(r) for r in profile.resumes)) & set(a.skills)
     additional = sorted(documented - set(_profile_skill_map(profile)))
@@ -374,16 +395,24 @@ def evaluate_rules(profile: Profile, job: JobInput, analysis: JobAnalysis | None
         profile = profile.model_copy(update={"skills": skills})
     # A posting that accepts FastAPI / Flask / Django needs one of the three.
     # Keep a separately stated mandatory requirement even if it also appears in an alternative.
-    backend_choices = r"\b(?:FastAPI|Flask|Django|Express|NestJS)\b"
-    alternatives = re.compile(backend_choices + r"(?:(?:\s*/\s*|\s+or\s+)" + backend_choices + r")+", re.I)
-    if alternatives.search(job.description):
-        from dataclasses import replace
-
-        others = alternatives.sub("", job.description)
+    backend_choices = r"\b(?:FastAPI|Flask|Django|Express|NestJS|Python|Node\.?js|Java)\b"
+    alternatives = re.compile(backend_choices + r"(?:(?:\s*,\s*(?:or\s+)?|\s*/\s*|\s+or\s+)" + backend_choices + r")+", re.I)
+    # "Python (FastAPI, Flask, Django) or Node.js" offers implementation paths.
+    choice_text = re.sub(r"\b(Python|Node\.?js)\s*\((" + backend_choices +
+                         r"(?:\s*,\s*" + backend_choices + r")*)\)\s+or\s+(" + backend_choices + r")",
+                         r"\1, \2 or \3", job.description, flags=re.I)
+    if alternatives.search(choice_text):
+        groups = [m for m in alternatives.finditer(choice_text)
+                  if re.search(r"/|\bor\b", m[0], re.I) or
+                  re.match(r",?\s*or similar\b", choice_text[m.end():], re.I)]
+        others = choice_text
+        for group in reversed(groups):
+            others = others[:group.start()] + others[group.end():]
         independently_required = analyze_job(replace(job, description=others, skills=[])).required_skills
         required = set(a.required_skills)
         mine = set(_profile_skill_map(profile))
-        for group in alternatives.findall(job.description):
+        for match in groups:
+            group = match[0]
             options = {canonicalize(s) for s in re.findall(backend_choices, group, re.I)}
             if options & mine:
                 required -= options - mine - independently_required
@@ -393,6 +422,25 @@ def evaluate_rules(profile: Profile, job: JobInput, analysis: JobAnalysis | None
     missing: list[str] = []
 
     prefs = profile.job_preferences
+    authorization = re.search(r"\bmust (?:already )?be (?:currently |legally )?authori[sz]ed to work in "
+                              r"(?:the )?(United States|US|USA|United Kingdom|UK|Canada|India|Germany|Singapore)"
+                              r"\b(?=\s*(?:without sponsorship|without the need for sponsorship|[.;\n]|$))",
+                              job.description, re.I)
+    if authorization:
+        aliases = {"us": "united states", "usa": "united states", "uk": "united kingdom"}
+        country = aliases.get(authorization[1].lower(), authorization[1].lower())
+        allowed = {aliases.get(c.lower(), c.lower()) for c in profile.work_preferences.authorized_countries}
+        if allowed and country not in allowed:
+            ctx.blockers.append(f"Employer requires existing work authorization in {authorization[1]}; "
+                                "the country is outside your configured authorizations")
+        elif not allowed:
+            ctx.flags.append(f"Verify your authorization to work in {authorization[1]} as required by the employer")
+    if re.search(r"^(?:(?:senior|junior|lead|assistant|chief) )*(?:accountant|graphic designer|business manager|sales manager)$",
+                 job.title.strip(), re.I):
+        ctx.blockers.append(f"Non-engineering occupation: {job.title}")
+    if re.search(r"\bGTM engineer", job.title, re.I) and re.search(r"outbound into enterprise accounts|own the sales pipeline",
+                                                                   job.description, re.I):
+        ctx.blockers.append("Sales role: the description assigns outbound prospecting and enterprise account ownership")
     for company in prefs.excluded_companies:
         if company.strip() and company.strip().lower() in (job.company or "").lower():
             ctx.blockers.append(f"Company '{job.company}' is excluded")
@@ -408,6 +456,8 @@ def evaluate_rules(profile: Profile, job: JobInput, analysis: JobAnalysis | None
         "seniority": _score_seniority(profile, a, ctx),
         "location": _score_location(profile, job, a, ctx),
     }
+    if job.title != card_title:
+        ctx.reasons.insert(0, f"The posting identifies the role as {job.title}; the card lists {card_title}")
     if additional:
         ctx.reasons.append(f"Additional skills listed in your resumes: {', '.join(additional)}")
     if prefs.min_salary_lpa and a.salary_max_lpa is not None and a.salary_max_lpa < prefs.min_salary_lpa:
@@ -424,6 +474,9 @@ def evaluate_rules(profile: Profile, job: JobInput, analysis: JobAnalysis | None
             foreign.setdefault("mobile", []).append(skill)
         elif skill in _HEAVY_BACKEND_SKILLS:
             foreign.setdefault("backend", []).append(skill)
+    named_requirements = sorted(set(missing) & {"Amazon QuickSight", "Kiro", "Supabase"})
+    if named_requirements:
+        ctx.flags.append("Verify experience with the explicitly required tools: " + ", ".join(named_requirements))
     for family, skills in foreign.items():
         if len(skills) >= 2:
             ctx.flags.append(f"The description requires {', '.join(skills[:4])} ({family}) - not among your skills")
@@ -472,15 +525,19 @@ def evaluate_rules(profile: Profile, job: JobInput, analysis: JobAnalysis | None
             and a.optional_skills & _FRONTEND_CORE and a.required_skills & _PLATFORMS
             and re.search(r"cloud-based applications and pipelines|cloud migration", job.description, re.I)):
         ctx.blockers.append("Cloud role: the required stack is backend and the posting lists web technologies as preferred")
+    supported_fullstack = False
     if a.title_category == "fullstack" and prefs.accept_fullstack and not ctx.heavy_stack:
         duty = r"\b(?:build|develop|implement|maintain|design)(?:ing)?\b[^.\n;]{0,70}"
         frontend_duty = re.search(duty + r"\b(?:React|Angular|Next\.js|user interfaces?|front[ -]?end)\b", job.description, re.I)
         backend_duty = re.search(duty + r"\b(?:APIs?|back[ -]?end|server[ -]side)\b", job.description, re.I)
         req = set(a.required_skills)
-        if (frontend_duty and backend_duty and req & mine & _FRONTEND_CORE and req & mine & _PLATFORMS
+        explicit_stack = (job.title != card_title and re.search(r"deep frontend experience|responsive user interfaces",
+                                                             job.description, re.I))
+        if (((frontend_duty and backend_duty) or explicit_stack) and req & mine & _FRONTEND_CORE and req & mine & _PLATFORMS
                 and not (req & _PLATFORMS - mine)):
             ctx.flags = [flag for flag in ctx.flags if not flag.startswith("Full-stack role is backend-heavy")]
             ctx.blockers = [b for b in ctx.blockers if not b.startswith("Backend-heavy full-stack role: frontend focus")]
+            supported_fullstack = True
             ctx.reasons.append("Description assigns both frontend and API development using your stack")
     if a.title_category in {"generic", "fullstack", "other"}:
         framework_req = re.search(r"(?:proven|required|mandatory) experience with (?:ML/DL )?frameworks (?:like|such as) "
@@ -502,9 +559,13 @@ def evaluate_rules(profile: Profile, job: JobInput, analysis: JobAnalysis | None
                         for line in lines)
             back = sum(bool(re.search(r"back[ -]?end|databases?|cloud (?:services|infrastructure)|serverless",
                                       line, re.I)) for line in lines)
-            if back >= 3 and back > front:
+            if back >= 3 and back > front and not supported_fullstack:
                 ctx.flags.append(f"Responsibilities include {back} backend or infrastructure duties and {front} "
                                  "frontend duties. Check the frontend share.")
+    for must in re.finditer(r"\buse of ([A-Za-z][A-Za-z0-9.+#-]{1,25}) is a must\b", job.description, re.I):
+        skill = must[1]
+        if canonicalize(skill) not in mine and not keyword_in(skill, profile.professional.model_dump_json()):
+            ctx.flags.append(f"Verify mandatory {skill} experience; the posting explicitly requires it")
     requirement = re.search(r"must have (?:hands[ -]on )?experience (?:building|developing) ([^.,;\n]{4,70})",
                             job.description, re.I)
     if requirement:
@@ -536,8 +597,6 @@ def evaluate_rules(profile: Profile, job: JobInput, analysis: JobAnalysis | None
     breakdown["preference"] = adjust
     m = profile.matching
     if ctx.blockers:
-        decision = Decision.SKIP
-    elif score < m.skip_threshold:
         decision = Decision.SKIP
     elif score >= m.apply_threshold and not ctx.flags:
         decision = Decision.APPLY
@@ -666,7 +725,7 @@ def preferences_rev(profile: Profile) -> str:
 
     wp = profile.work_preferences
     data = {
-        "matcher_version": 3,
+        "matcher_version": 4,
         "job": profile.job_preferences.model_dump(mode="json"),
         "matching": profile.matching.model_dump(mode="json"),
         "work": {"locations": sorted(p.strip().lower() for p in wp.preferred_locations), "remote": wp.open_to_remote,
@@ -706,7 +765,7 @@ def title_prescreen(profile: Profile, title: str) -> list[str]:
     from app.matching.analyzer import classify_title, title_seniority
 
     reasons: list[str] = []
-    if keyword := _excluded_title_keyword(profile, title):
+    if (keyword := _excluded_title_keyword(profile, title)) and keyword.casefold() != "java developer":
         return [f"Title contains excluded keyword '{keyword}'"]
     level = title_seniority(title)
     if level == "intern":

@@ -135,14 +135,14 @@ def test_fullstack_searches_reach_portals_and_do_not_use_frontend_only_function(
     from app.portals.base import SearchQuery
     from app.portals.instahyre import InstahyreAdapter
     from app.portals.queries import frontend_queries
-    terms = ["Full Stack Engineer", "MERN Developer", "Full Stack AI Engineer"]
+    terms = ["Full Stack Engineer", "MERN Developer", "Full Stack AI Engineer", "Python FastAPI Full Stack Engineer"]
     unrelated = ["React Sales Manager", "Graphic Designer JavaScript", "TypeScript Accountant",
                  "React Native Developer", "Full Stack Mobile Engineer"]
     assert frontend_queries("naukri", terms + unrelated) == terms
     adapter = InstahyreAdapter(None, "https://example.test")
     queries = frontend_queries("instahyre", terms + unrelated)
     params = [parse_qs(urlsplit(adapter.search_url(SearchQuery(q, location="London"))).query) for q in queries]
-    assert [q["skills"][0] for q in params] == ["React", "MERN", "Generative AI"]
+    assert [q["skills"][0] for q in params] == ["React", "MERN", "Generative AI", "FastAPI"]
     assert all("job_functions" not in q and q["location"] == ["London"] for q in params)
 
 

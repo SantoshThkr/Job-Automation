@@ -29,6 +29,7 @@ def frontend_queries(portal: str, queries: list[str]) -> list[str]:
             title = next((skill for pattern, skill in _SKILL_TERMS if re.search(pattern, title, re.I)), "JavaScript")
         elif _FULLSTACK.search(title) and portal == "instahyre":
             title = ("MERN" if re.search(r"\bmern\b", title, re.I) else "Full Stack AI"
-                     if re.search(r"\bai\b", title, re.I) else "Full Stack React")
+                     if re.search(r"\bai\b", title, re.I) else "Full Stack FastAPI" if "fastapi" in title.casefold()
+                     else "Full Stack Python" if "python" in title.casefold() else "Full Stack React")
         result.setdefault(title.casefold(), title)
     return list(result.values())
