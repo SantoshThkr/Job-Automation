@@ -1,4 +1,4 @@
-"""Job matcher: deterministic rules first, then (optionally) the local AI for ambiguous cases.
+"""Job matcher: deterministic rules first, then (optionally) the local AI for viable candidates.
 
 The AI can refine the score and resolve MANUAL_REVIEW cases, but it can never override a hard
 blocker (excluded keyword, experience gap, location, ...). Without Ollama the rules decide alone.
@@ -43,15 +43,11 @@ class JobMatcher:
         m = self.profile.matching
         want_ai = m.use_ai if use_ai is None else use_ai
         if want_ai and self.assistant is not None and not result.blockers:
-            near_threshold = (abs(result.score - m.apply_threshold) <= 10
-                              or abs(result.score - m.skip_threshold) <= 5)
-            # the title alone does not say what the job is: let the model read the description
-            title_unclear = result.analysis.get("title_category") in {"generic", "other", "fullstack"}
-            if (not m.ai_for_ambiguous_only or result.decision == Decision.MANUAL_REVIEW or near_threshold
-                    or title_unclear):
-                await self._apply_ai(job, result)
+            await self._apply_ai(job, result)
         elif want_ai and result.blockers:
             result.ai = {"used": False, "reason": "hard blocker - AI not needed"}
+        elif want_ai:
+            result.ai = {"used": False, "reason": "Ollama assistant unavailable - rules only"}
         else:
             result.ai = {"used": False, "reason": "AI disabled for matching"}
         if result.ai is None:
@@ -63,7 +59,7 @@ class JobMatcher:
     async def _apply_ai(self, job: JobInput, result: MatchResult) -> None:
         assert self.assistant is not None
         if not await self.assistant.available():
-            result.ai = {"used": False, "reason": "Ollama unavailable - rules only"}
+            result.ai = {"used": False, "reason": getattr(getattr(self.assistant, "provider", None), "paused", "") or "Ollama unavailable - rules only"}
             return
         try:
             u = await self.assistant.understand_job(self.profile, job)
@@ -124,4 +120,7 @@ class JobMatcher:
     def _attach_resume(self, result: MatchResult) -> None:
         result.resume_comparison = rank_resumes(self.profile, result.resume_category or result.category,
                                                 list(result.analysis["skills"]), result.analysis["required_skills"])
+        ai = result.ai or {}
+        if ai.get("used") and ai.get("confidence", 0) >= AI_DECISIVE_CONFIDENCE:
+            result.resume_comparison.sort(key=lambda r: (r["score"], r["id"] == ai.get("recommended_resume")), reverse=True)
         result.resume_id = result.resume_comparison[0]["id"] if result.resume_comparison else None

@@ -100,6 +100,9 @@ def _processing_stage(job: Job) -> tuple[str, str]:
     status = str(job.status)
     if app and app.submit_attempted and not app.confirmed and status not in {"APPLIED", "ALREADY_APPLIED"}:
         return "SUBMISSION_UNVERIFIED", "Check the portal application history before retrying."
+    if status in {"FAILED", "MANUAL_ACTION_REQUIRED", "DRY_RUN"} and any(term in
+            (job.status_reason or "").lower() for term in ("invalid input", "validation error", "validation failed")):
+        return "FORM_VALIDATION_FAILED", "Inspect the rejected fields and provide the requested format before retrying."
     if status == "SKIPPED" and ((job.match_details or {}).get("recency_skip") or
             "outside your job-recency window" in (job.status_reason or "")):
         return "EXCLUDED_BY_DATE", "Check the recorded posting date against the selected window."
@@ -110,6 +113,10 @@ def _processing_stage(job: Job) -> tuple[str, str]:
         return "APPLICATION_FAILED", "Inspect the failed step and its recorded error before retrying."
     if status == "MANUAL_ACTION_REQUIRED":
         return "APPLICATION_BLOCKED", "Resolve the recorded form, login or portal issue before continuing."
+    if status in {"NEW", "REVIEW_PENDING"} and not job.description:
+        return "DETAILS_NEEDED", "Open the posting and verify its responsibilities and eligibility."
+    if status == "NEW":
+        return "DISCOVERED", "Awaiting job evaluation."
     if status == "REVIEW_PENDING":
         return status, "Check the evidence named in the review reason, then approve or skip."
     if status == "QUEUED":

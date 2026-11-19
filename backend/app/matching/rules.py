@@ -70,9 +70,16 @@ def keyword_in(keyword: str, text: str) -> bool:
     return re.search(left + re.escape(kw) + right, text.lower()) is not None
 
 
+def _recruiter_title(title: str) -> bool:
+    return bool(re.fullmatch(r"(?:(?:us|it|hr|technical|senior|talent acquisition|engineering)\s+)*recruiter",
+                             title.strip(), re.I))
+
+
 def _excluded_title_keyword(profile: Profile, title: str) -> str | None:
     variants = [title, normalize_title_aliases(title)]
     for keyword in profile.job_preferences.excluded_title_keywords:
+        if keyword.strip().casefold() in {"fresher", "junior", "entry-level", "entry level", "senior", "staff", "lead"}:
+            continue
         if not any(keyword_in(keyword, v) for v in variants):
             continue
         # The profile excludes ML roles. A frontend role can explicitly name ML as its product domain.
@@ -161,7 +168,7 @@ def share_evidence(a: JobAnalysis) -> str:
             f"backend/other: {', '.join(a.backend_skills[:4]) or 'none named'}")
 
 
-def _score_ratio(profile: Profile, a: JobAnalysis, ctx: _Ctx) -> float:
+def _score_ratio(profile: Profile, job: JobInput, a: JobAnalysis, ctx: _Ctx) -> float:
     ratio = a.frontend_ratio
     min_ratio = profile.job_preferences.min_frontend_ratio
     if ratio is None:
@@ -177,7 +184,9 @@ def _score_ratio(profile: Profile, a: JobAnalysis, ctx: _Ctx) -> float:
     else:
         score = ratio / max(min_ratio - 0.2, 0.01) * 40
     ctx.reasons.append(f"Frontend focus ≈ {pct}% (your minimum {round(min_ratio * 100)}%)")
-    if a.title_category in {"generic", "other", "fullstack"} and ratio < min_ratio - 0.2:
+    if a.title_category in {"generic", "other", "fullstack"} and ratio < min_ratio - 0.2 and (
+            len(set(a.required_skills) & _HEAVY_BACKEND_SKILLS - set(_profile_skill_map(profile))) >= 2 or
+            re.search(r"build distributed backend services|develop backend services exclusively", job.description, re.I)):
         # far below your minimum, measured from the description: not a role to decide about, a role to leave out
         # ("Senior NONMEM Programmer", "Forward Deployed Engineer", "Full Stack Engineer" with a backend description)
         kind = "Backend-heavy full-stack role" if a.title_category == "fullstack" else "Not a frontend role"
@@ -284,15 +293,10 @@ def _score_experience(profile: Profile, job: JobInput, a: JobAnalysis, ctx: _Ctx
         ctx.reasons.append(f"Experience: requires {req} yrs, you have {years:g} (slightly under)")
         return 100 - gap / max(tol, 0.5) * 40
     if hi is not None and years > hi:
-        over = years - hi
-        if hi <= 3 and hi <= years / 2:
-            if a.experience_conflict:  # "Senior ..." with "0-2 Yrs" in the portal's field: yours to judge, not a skip
-                ctx.flags.append(a.experience_note)
-                return 60.0
+        if a.experience_conflict:
+            ctx.reasons.append(a.experience_note + "; a lower advertised range is acceptable")
         ctx.reasons.append(f"Experience: requires {req} yrs, you have {years:g} (above range)")
-        if over <= tol:
-            return 85.0
-        return 60.0 if over <= 2 * tol else 35.0
+        return 100.0
     ctx.reasons.append(f"Experience: requires {req} yrs, you have {years:g}")
     return 100.0
 
@@ -311,13 +315,9 @@ def _score_seniority(profile: Profile, a: JobAnalysis, ctx: _Ctx) -> float:
         return 35.0
     if job == "unspecified":
         return 90.0
-    diff = abs(SENIORITY_RANK[job] - SENIORITY_RANK[cand])
+    diff = max(0, SENIORITY_RANK[job] - SENIORITY_RANK[cand])
     score = {0: 100.0, 1: 80.0, 2: 45.0}.get(diff, 15.0)
     ctx.reasons.append(f"Seniority: {job} role vs your level ({cand})")
-    if job == "junior" and SENIORITY_RANK[cand] >= SENIORITY_RANK["senior"]:
-        # "Junior React Developer" scored 98.6 for a senior engineer (LinkedIn dry run, 2026-10-14): the title, the
-        # description and the skills all fit - the level does not. Yours to decide, never applied to by the score.
-        ctx.flags.append(f"Junior-level role (the title says so); your experience puts you at {cand} level")
     return score
 
 
@@ -395,11 +395,11 @@ def evaluate_rules(profile: Profile, job: JobInput, analysis: JobAnalysis | None
         profile = profile.model_copy(update={"skills": skills})
     # A posting that accepts FastAPI / Flask / Django needs one of the three.
     # Keep a separately stated mandatory requirement even if it also appears in an alternative.
-    backend_choices = r"\b(?:FastAPI|Flask|Django|Express|NestJS|Python|Node\.?js|Java)\b"
-    alternatives = re.compile(backend_choices + r"(?:(?:\s*,\s*(?:or\s+)?|\s*/\s*|\s+or\s+)" + backend_choices + r")+", re.I)
+    skill_choices = r"\b(?:FastAPI|Flask|Django|Express|NestJS|MySQL|PostgreSQL|Firebase|Supabase|Python|Node\.?js|Java)\b"
+    alternatives = re.compile(skill_choices + r"(?:(?:\s*,\s*(?:or\s+)?|\s*/\s*|\s+or\s+)" + skill_choices + r")+", re.I)
     # "Python (FastAPI, Flask, Django) or Node.js" offers implementation paths.
-    choice_text = re.sub(r"\b(Python|Node\.?js)\s*\((" + backend_choices +
-                         r"(?:\s*,\s*" + backend_choices + r")*)\)\s+or\s+(" + backend_choices + r")",
+    choice_text = re.sub(r"\b(Python|Node\.?js)\s*\((" + skill_choices +
+                         r"(?:\s*,\s*" + skill_choices + r")*)\)\s+or\s+(" + skill_choices + r")",
                          r"\1, \2 or \3", job.description, flags=re.I)
     if alternatives.search(choice_text):
         groups = [m for m in alternatives.finditer(choice_text)
@@ -413,7 +413,7 @@ def evaluate_rules(profile: Profile, job: JobInput, analysis: JobAnalysis | None
         mine = set(_profile_skill_map(profile))
         for match in groups:
             group = match[0]
-            options = {canonicalize(s) for s in re.findall(backend_choices, group, re.I)}
+            options = {canonicalize(s) for s in re.findall(skill_choices, group, re.I)}
             if options & mine:
                 required -= options - mine - independently_required
         a = replace(a, required_skills=required)
@@ -422,6 +422,26 @@ def evaluate_rules(profile: Profile, job: JobInput, analysis: JobAnalysis | None
     missing: list[str] = []
 
     prefs = profile.job_preferences
+    eligibility_text = f"{job.title}\n{job.description}"
+    restriction = re.search(r"\b(?:only (?:fresh graduates|freshers|current students)|(?:fresh graduates|freshers|current students) only|"
+                            r"(?:no prior (?:professional |full.time )?(?:employment|experience)|no prior work experience) (?:allowed|required for eligibility)|"
+                            r"must (?:have no prior (?:professional |full.time )?(?:employment|experience)|be (?:a )?currently enrolled student))\b",
+                            eligibility_text, re.I)
+    if restriction:
+        if re.search(r"student|enrolled", restriction[0], re.I):
+            ctx.flags.append(f"Verify current enrolment: the employer states '{restriction[0]}'")
+        elif profile.professional.total_experience_years:
+            ctx.blockers.append(f"Employer explicitly restricts eligibility: '{restriction[0]}'; you have professional experience")
+    batch = re.search(r"(?:graduation (?:year|batch)|batch of|graduating class of)\s*[:=-]?\s*((?:20\d{2})(?:\s*(?:/|or|,)\s*20\d{2})*)\s*(?:graduates? )?only\b",
+                      eligibility_text, re.I) or re.search(
+        r"\b(20\d{2}(?:\s*(?:/|or|,)\s*20\d{2})*)\s+graduates?\s+only\b", eligibility_text, re.I) or re.search(
+        r"\bonly\s+(20\d{2}(?:\s*(?:/|or|,)\s*20\d{2})*)\s+graduates?\b", eligibility_text, re.I)
+    if batch:
+        allowed_years = set(re.findall(r"20\d{2}", batch[1]))
+        years = {str(e.end_year) for e in profile.professional.education if e.end_year}
+        if not years & allowed_years:
+            message = f"Employer restricts graduation year: '{batch[0]}'"
+            (ctx.blockers if years else ctx.flags).append(message)
     authorization = re.search(r"\bmust (?:already )?be (?:currently |legally )?authori[sz]ed to work in "
                               r"(?:the )?(United States|US|USA|United Kingdom|UK|Canada|India|Germany|Singapore)"
                               r"\b(?=\s*(?:without sponsorship|without the need for sponsorship|[.;\n]|$))",
@@ -435,6 +455,8 @@ def evaluate_rules(profile: Profile, job: JobInput, analysis: JobAnalysis | None
                                 "the country is outside your configured authorizations")
         elif not allowed:
             ctx.flags.append(f"Verify your authorization to work in {authorization[1]} as required by the employer")
+    if _recruiter_title(job.title):
+        ctx.blockers.append("Recruiter role: the job title identifies recruiting as the occupation")
     if re.search(r"^(?:(?:senior|junior|lead|assistant|chief) )*(?:accountant|graphic designer|business manager|sales manager)$",
                  job.title.strip(), re.I):
         ctx.blockers.append(f"Non-engineering occupation: {job.title}")
@@ -450,7 +472,7 @@ def evaluate_rules(profile: Profile, job: JobInput, analysis: JobAnalysis | None
 
     breakdown = {
         "title": _score_title(profile, job, a, ctx),
-        "frontend_ratio": _score_ratio(profile, a, ctx),
+        "frontend_ratio": _score_ratio(profile, job, a, ctx),
         "skills": _score_skills(profile, job, a, ctx, matched, missing),
         "experience": _score_experience(profile, job, a, ctx),
         "seniority": _score_seniority(profile, a, ctx),
@@ -474,6 +496,10 @@ def evaluate_rules(profile: Profile, job: JobInput, analysis: JobAnalysis | None
             foreign.setdefault("mobile", []).append(skill)
         elif skill in _HEAVY_BACKEND_SKILLS:
             foreign.setdefault("backend", []).append(skill)
+    if re.search(r"\b(?:SFCC|Salesforce Commerce Cloud)\b", job.title, re.I) and re.search(
+            r"(?:years? of experience|hands.on experience)[^.\n]{0,75}Salesforce Commerce Cloud", job.description, re.I):
+        if not any("sfcc" in x.lower() or "salesforce commerce cloud" in x.lower() for x in profile.skills.all):
+            ctx.flags.append("Verify the employer's required experience developing Salesforce Commerce Cloud applications")
     named_requirements = sorted(set(missing) & {"Amazon QuickSight", "Kiro", "Supabase"})
     if named_requirements:
         ctx.flags.append("Verify experience with the explicitly required tools: " + ", ".join(named_requirements))
@@ -562,6 +588,10 @@ def evaluate_rules(profile: Profile, job: JobInput, analysis: JobAnalysis | None
             if back >= 3 and back > front and not supported_fullstack:
                 ctx.flags.append(f"Responsibilities include {back} backend or infrastructure duties and {front} "
                                  "frontend duties. Check the frontend share.")
+    language = re.search(r"business.level (Japanese|German|French|Spanish|Mandarin) communication assessment",
+                         job.description, re.I)
+    if language and not any(language[1].casefold() in name.casefold() for name in profile.professional.languages):
+        ctx.flags.append(f"Verify language proficiency: the employer conducts a {language[0]}")
     for must in re.finditer(r"\buse of ([A-Za-z][A-Za-z0-9.+#-]{1,25}) is a must\b", job.description, re.I):
         skill = must[1]
         if canonicalize(skill) not in mine and not keyword_in(skill, profile.professional.model_dump_json()):
@@ -725,12 +755,14 @@ def preferences_rev(profile: Profile) -> str:
 
     wp = profile.work_preferences
     data = {
-        "matcher_version": 4,
+        "matcher_version": 5,
         "job": profile.job_preferences.model_dump(mode="json"),
         "matching": profile.matching.model_dump(mode="json"),
         "work": {"locations": sorted(p.strip().lower() for p in wp.preferred_locations), "remote": wp.open_to_remote,
                  "hybrid": wp.open_to_hybrid, "onsite": wp.open_to_onsite, "relocate": wp.willing_to_relocate},
         "years": profile.professional.total_experience_years,
+        "education_years": sorted(e.end_year for e in profile.professional.education if e.end_year),
+        "authorized_countries": sorted(wp.authorized_countries),
         "skills": [sorted(s.lower() for s in profile.skills.primary), sorted(s.lower() for s in profile.skills.secondary)],
     }
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:12]
@@ -765,6 +797,8 @@ def title_prescreen(profile: Profile, title: str) -> list[str]:
     from app.matching.analyzer import classify_title, title_seniority
 
     reasons: list[str] = []
+    if _recruiter_title(title):
+        return ["Recruiter role: the job title identifies recruiting as the occupation"]
     if (keyword := _excluded_title_keyword(profile, title)) and keyword.casefold() != "java developer":
         return [f"Title contains excluded keyword '{keyword}'"]
     level = title_seniority(title)

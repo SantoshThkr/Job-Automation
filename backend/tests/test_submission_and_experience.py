@@ -513,3 +513,27 @@ def test_success_flag_and_disappearing_controls_do_not_confirm_an_application():
     after = PageState(url="https://co.test/home", fields=[])
     hit = NetworkHit("POST", "https://co.test/apply", 200, success=True)
     assert decide(BEFORE, after, network=[hit], final=True).state != SubmissionState.CONFIRMED
+
+
+@pytest.mark.browser
+async def test_notice_format_from_linked_help_and_no_repeat_for_unknown_ctc(engine, profile):
+    from app.browser.forms import scan_fields
+
+    profile.professional.notice_period_days = 0
+    ctx = make_ctx(engine, profile, JOB, AgentMode.DRY_RUN, FakeGate())
+    await engine.page.set_content("""
+      <form><label for="notice">Notice period</label>
+      <input id="notice" value="Immediate" aria-describedby="noticeHelp"
+             oninput="document.querySelector('#noticeHelp').innerText=''">
+      <p id="noticeHelp">Invalid input. Enter number of days.</p>
+      <label for="ctc">Expected CTC</label><input id="ctc" value="Negotiable" aria-describedby="ctcHelp"
+             oninput="window.salaryEdits=(window.salaryEdits || 0)+1">
+      <p id="ctcHelp">Invalid input</p></form>""")
+    form = engine.page.locator("form")
+    filler = ctx.form_filler()
+    await scan_fields(form)
+    first = await filler.fix_invalid(form)
+    assert await form.locator("#notice").input_value() == "0"
+    assert any("validated" in entry for entry in first.fixed)
+    assert not (await filler.fix_invalid(form)).fixed
+    assert await engine.page.evaluate("window.salaryEdits || 0") == 0

@@ -42,6 +42,7 @@ export default function JobDetailPage() {
   };
   const canApprove = ["REVIEW_PENDING", "SKIPPED", "NEW", "DRY_RUN"].includes(j.status);
   const canRetry = ["FAILED", "MANUAL_ACTION_REQUIRED", "DRY_RUN"].includes(j.status);
+  const analyzing = agent.data?.alive && agent.data.current_job?.id === j.id && agent.data.current_step.startsWith("Evaluating fit:");
   const final = ["APPLIED", "ALREADY_APPLIED"].includes(j.status);
 
   return (
@@ -63,11 +64,11 @@ export default function JobDetailPage() {
 
       {agent.data?.pending_job_id === j.id && <GateBanner agent={agent.data} onChange={() => { agent.refresh(); job.refresh(); }} />}
 
-      {j.status_reason && (
+      {(j.status_reason || j.processing_stage) && (
         <div className={`alert ${j.status === "FAILED" ? "err" : j.status === "APPLIED" ? "info" : "warn"}`}>
           <div className="title">Recorded status: {j.status.replaceAll("_", " ").toLowerCase()}</div>
           <p>{j.status_reason}</p>
-          {j.processing_stage && <div>Processing stage · {j.processing_stage}</div>}
+          {j.processing_stage && <div>Processing stage · {analyzing ? "ANALYZING" : j.processing_stage}</div>}
           {j.next_action && <div>Next action · {j.next_action}</div>}
         </div>
       )}
@@ -218,6 +219,11 @@ function MatchExplanation({ j }: { j: JobDetail }) {
           frontend {String(ai.frontend_percentage)}%, confidence {Number(ai.confidence).toFixed(2)} ({String(ai.effect ?? "")})
         </p>
       ) : <p className="small muted">{String(ai?.reason ?? "Not used")}</p>}
+      {ai?.used === true && <div className="small">
+        {Array.isArray(ai.requirement_quotes) && ai.requirement_quotes.map((q, i) => <blockquote key={i}>{String(q)}</blockquote>)}
+        {Array.isArray(ai.preferred_skills) && ai.preferred_skills.length > 0 && <p>Preferred skills: {ai.preferred_skills.join(", ")}</p>}
+        {Boolean(ai.recommended_resume) && <p>Model’s resume choice: {String(ai.recommended_resume)}</p>}
+      </div>}
       {m.resume_comparison && m.resume_comparison.length > 0 && <details><summary>{m.resume_comparison_recomputed ? "Current resume comparison" : "Resume comparison at evaluation"}</summary>
         <ul>{m.resume_comparison.map(r => <li key={r.id}>{r.id} · {r.source} · {r.coverage_pct != null && `${r.coverage_pct}% weighted skill coverage · `}{r.matched.length} matching skills.
           Required skills found: {r.matched_required.join(", ") || "none"}</li>)}</ul>

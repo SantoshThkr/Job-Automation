@@ -21,7 +21,7 @@ from playwright.async_api import Frame, Locator, Page
 from app.answers.answerer import Answerer
 from app.answers.normalize import NUMBER, fit_number, refit_after_rejection
 from app.answers.options import choose_option, real_options, split_choices
-from app.answers.question_bank import Answer, QuestionContext
+from app.answers.question_bank import Answer, QuestionContext, resolve
 from app.browser.engine import BrowserEngine
 from app.matching.analyzer import JobInput
 
@@ -211,6 +211,9 @@ _SCAN_JS = r"""
                 options: [], value: '', maxLength: el.maxLength > 0 ? el.maxLength : null,
                 placeholder: el.getAttribute('placeholder') || '', accept: el.getAttribute('accept') || '', multiple: !!el.multiple,
                 step: el.getAttribute('step') || '', min: el.getAttribute('min') || '', max: el.getAttribute('max') || '',
+                helpText: (el.getAttribute('aria-describedby') || '').split(/\s+/)
+                    .map(id => doc.getElementById(id)).filter(n => n && n.getClientRects().length)
+                    .map(n => n.innerText || '').join(' ').trim(),
                 pattern: el.getAttribute('pattern') || '', inputmode: el.getAttribute('inputmode') || '' };
     if (type === 'select') {
       f.options = Array.from(el.options).map(o => ({ label: (o.text || '').trim(), id: o.value, checked: o.selected }));
@@ -324,6 +327,7 @@ class FormField:
     min: str = ""
     max: str = ""
     pattern: str = ""
+    help_text: str = ""
     inputmode: str = ""
     defaulted: bool = False  # a <select> still on the browser's first option: nobody chose it, but it would be sent
     own_label: bool = False  # the label is the field's own (<label for>, wrapping label, aria-label), not nearby text
@@ -350,7 +354,7 @@ class FormField:
                    value=d.get("value") or "", max_length=d.get("maxLength"), placeholder=d.get("placeholder") or "",
                    accept=d.get("accept") or "", multiple=bool(d.get("multiple")), step=str(d.get("step") or ""),
                    min=str(d.get("min") or ""), max=str(d.get("max") or ""), pattern=str(d.get("pattern") or ""),
-                   inputmode=str(d.get("inputmode") or ""), defaulted=bool(d.get("defaulted")),
+                   help_text=d.get("helpText") or "", inputmode=str(d.get("inputmode") or ""), defaulted=bool(d.get("defaulted")),
                    own_label=bool(d.get("ownLabel")), widget=bool(d.get("widget")))
 
 
@@ -597,7 +601,7 @@ class FormFiller:
 
         if f.type in {"number", "text", "tel"}:
             fitted = fit_number(ans.value, field_type=f.type, step=f.step, min_=f.min, max_=f.max, pattern=f.pattern,
-                                inputmode=f.inputmode, hint=f"{f.label} {f.placeholder}")
+                                inputmode=f.inputmode, hint=f"{f.label} {f.placeholder} {f.help_text}")
             if fitted.value is None:
                 ans.needs_review = True
                 return FilledField(f, question, ans, "unresolved" if f.required else "skipped", fitted.note)
@@ -620,7 +624,7 @@ class FormFiller:
                 verified, problem = await self.verify(loc, f, ans.value, root)
         if ok and not verified and problem and NUMBER.match(ans.value or ""):
             refit = refit_after_rejection(ans.value, problem, field_type=f.type, step=f.step, min_=f.min, max_=f.max,
-                                          pattern=f.pattern, inputmode=f.inputmode, hint=f"{f.label} {f.placeholder}")
+                                          pattern=f.pattern, inputmode=f.inputmode, hint=f"{f.label} {f.placeholder} {f.help_text}")
             if refit.value is not None and await self.set_value(loc, f, refit.value, root=root):
                 verified, problem = await self.verify(loc, f, refit.value, root)
                 ans.note = f"{ans.note}; {refit.note}".strip("; ")
@@ -673,18 +677,50 @@ class FormFiller:
             msg = (b.get("message") or "").strip()
             label = (f.label if f else b.get("label")) or "field"
             out.messages.append(f"{label}: {msg}" if msg else f"{label}: marked invalid")
-            if f is None or f.id in self._repaired_invalid:
+            key = f"{f.type}:{label.casefold()}:{f.name}" if f else ""
+            if f is None or key in self._repaired_invalid or f.id in self._repaired_invalid:
                 continue
-            self._repaired_invalid.add(f.id)
+            self._repaired_invalid.update((f.id, key))
             loc = _root_locator(root, f.selector)
             value = (f.value or "").strip()
-            if f.type in {"text", "number", "tel"} and NUMBER.match(value):
+            formats = self.alternate_formats(f, label, value)
+            hints = f"{label} {f.placeholder} {f.help_text} {msg}"
+            numeric_format = None
+            if (re.search(r"notice period", label, re.I) and
+                    re.search(r"\bdays?\b", hints, re.I) and
+                    (f.type == "number" or f.inputmode == "numeric" or re.search(r"number|numeric|digits", hints, re.I))):
+                days = self.answerer.profile.professional.notice_period_days
+                if days is not None and str(days) != value:
+                    numeric_format = str(days)
+                    formats.insert(0, numeric_format)
+            if (re.search(r"ctc|salary|compensation", label, re.I) and
+                    re.search(r"\blpa\b|\blakhs?\b|\binr\b|rupees|₹", hints, re.I)):
+                answer = resolve(QuestionContext(question=hints, field_type=f.type, job=self.job), self.answerer.profile)
+                if answer and not answer.needs_review and answer.value != value and NUMBER.fullmatch(answer.value or ""):
+                    numeric_format = answer.value
+                    formats.insert(0, numeric_format)
+            if f.type in {"text", "number", "tel"} and NUMBER.fullmatch(value):
                 refit = refit_after_rejection(value, msg, field_type=f.type, step=f.step, min_=f.min, max_=f.max,
-                                              pattern=f.pattern, inputmode=f.inputmode, hint=f"{f.label} {f.placeholder}")
-                if refit.value is not None and await self.set_value(loc, f, refit.value, root=root):
-                    out.fixed.append(f"{label} = {refit.value} ({refit.note})")
-                continue
-            if f.type in {"text", "search"} and value:
+                                              pattern=f.pattern, inputmode=f.inputmode, hint=f"{label} {f.placeholder} {f.help_text}")
+                if refit.value and refit.value != value:
+                    numeric_format = refit.value
+                    formats.insert(0, numeric_format)
+            if value:
+                constraints = {"question": label, "type": f.type, "required": f.required, "step": f.step, "min": f.min, "max": f.max,
+                               "pattern": f.pattern, "inputmode": f.inputmode, "placeholder": f.placeholder,
+                               "help": f.help_text, "max_length": f.max_length, "options": f.option_labels,
+                               "error": msg, "rejected": value}
+                selected = await self.answerer.repair_format(constraints, formats) or numeric_format
+                if selected and selected != value and await self.set_value(loc, f, selected, root=root):
+                    await loc.dispatch_event("change")
+                    await loc.blur()
+                    verified, remaining = await self.verify(loc, f, selected, root)
+                    out.fixed.append(f"{label}: " + ("validated" if verified else "format changed; check on next step"))
+                    if remaining:
+                        out.messages.append(f"{label}: {remaining}")
+                    continue
+            if f.type in {"text", "search"} and value and (f.widget or await loc.get_attribute("list") or
+                    await loc.get_attribute("aria-autocomplete")):
                 await loc.fill("")
                 if await self.set_value(loc, f, value, root=root) and (await loc.input_value()).strip() != value:
                     out.fixed.append(f"{label} = {(await loc.input_value()).strip()} (picked from the suggestions)")

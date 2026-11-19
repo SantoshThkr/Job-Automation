@@ -140,12 +140,8 @@ def test_a_junior_listing_field_does_not_skip_a_role_whose_description_asks_for_
     assert r.decision == "APPLY" and any("the description is used" in x for x in r.reasons), (r.blockers, r.flags)
 
 
-def test_senior_title_with_a_junior_field_and_a_silent_description_is_yours_to_decide(profile):
-    """Naukri 'Senior Frontend Engineer', field "0-2 Yrs", nothing in the description: one of the two is wrong.
-    Not skipped, not applied to: it waits for your decision with that sentence."""
-    r = rules(profile, "Senior Frontend Engineer", experience="0-2 Yrs")
-    assert r.decision == "MANUAL_REVIEW" and not r.blockers
-    assert any("0-2 years" in f and "title says 'senior'" in f for f in r.flags), r.flags
+def test_senior_title_with_lower_advertised_range_remains_eligible(profile):
+    assert rules(profile, "Senior Frontend Engineer", experience="0-2 Yrs").decision == "APPLY"
 
 
 @pytest.mark.parametrize("title,description,experience", [
@@ -153,12 +149,10 @@ def test_senior_title_with_a_junior_field_and_a_silent_description_is_yours_to_d
     ("React Developer", FRONTEND_JD + "\n2 to 5 years of experience", "0 - 2 years"),  # the description agrees
     ("Frontend Developer", FRONTEND_JD, "1-2 Yrs"),  # nothing contradicts the field
 ])
-def test_advertised_range_is_weighted_and_an_explicit_junior_role_is_excluded(profile, title, description, experience):
+def test_advertised_range_is_weighted_across_levels(profile, title, description, experience):
     r = rules(profile, title, description=description, experience=experience)
-    if title.startswith("Junior"):
-        assert r.decision == "MANUAL_REVIEW" and not r.blockers
-    else:
-        assert r.decision == "APPLY" and not r.blockers
+    assert r.decision == "APPLY" and not r.blockers
+
 
 
 # ------------------------------------------------------------------ what the local model may decide
@@ -337,15 +331,15 @@ def test_a_title_that_names_another_role_family_is_never_applied_to_on_its_score
 
 # ------------------------------------------------------------------ level and mandatory skills (LinkedIn dry run, 2026-10-14)
 
-def test_a_junior_role_is_not_applied_to_on_a_senior_engineers_score(profile):
-    """'Junior React Developer' scored 98.6 and was dry-run applied to: everything fits but the level."""
-    r = rules(profile, "Junior React Developer", experience="")
-    assert r.decision == "MANUAL_REVIEW" and r.score >= profile.matching.apply_threshold
-    assert any(f.startswith("Junior-level role") and "senior level" in f for f in r.flags), r.flags
-    assert rules(profile, "React Developer", experience="").decision == "APPLY"  # (no level in the title: unchanged)
-    p = profile.model_copy(deep=True)
-    p.professional.total_experience_years = 1.5  # for a junior engineer the same posting is simply a match
-    assert not any(f.startswith("Junior-level role") for f in JobMatcher(p).evaluate_rules_only(job("Junior React Developer", experience="")).flags)
+@pytest.mark.parametrize("level,band", [("Fresher", "0-1"), ("Entry-Level", "0-2"), ("Junior", "3-5"), ("Senior", "3-5")])
+def test_lower_advertised_level_alone_allows_application(profile, level, band):
+    assert rules(profile, f"{level} React Developer", experience=f"{band} years").decision == "APPLY"
+
+
+@pytest.mark.parametrize("restriction", ["2024 graduates only", "freshers only", "must have no prior professional employment"])
+def test_explicit_exclusive_eligibility_is_checked(profile, restriction):
+    result = rules(profile, "React Developer", description=FRONTEND_JD + "\n" + restriction)
+    assert result.blockers and result.decision == "SKIP"
 
 
 MOBILE_JD = FRONTEND_JD + "\nRequirements:\n- React Native, Android and iOS releases\n- Figma hand-off\n"
@@ -506,7 +500,7 @@ def test_preferred_web_stack_does_not_promote_cloud_migration(profile):
 
 def test_score_only_review_explains_threshold_and_weakest_components(profile):
     profile.matching.apply_threshold = 100
-    result = rules(profile, "React Developer", experience="1-3 years")
+    result = rules(profile, "React Developer", experience="8-9 years")
     assert result.decision == "MANUAL_REVIEW" and not result.flags
     reason = decision_reason(result, 100)
     assert "automatic threshold 100" in reason and "experience" in reason
@@ -557,3 +551,43 @@ def test_declared_fullstack_role_is_evaluated_using_actual_duties(profile, card,
     r = rules(profile, card, description=jd)
     assert r.decision == "APPLY" and "Django" not in r.missing_skills
     assert any(card in s and "posting identifies" in s for s in r.reasons)
+
+
+def test_alternative_database_vs_independently_required_tool(profile):
+    jd = FRONTEND_JD + "\nRequirements:\nWorking knowledge of databases such as MySQL, PostgreSQL, Firebase or Supabase."
+    profile.skills.secondary.append("PostgreSQL")
+    result = rules(profile, "Junior Full Stack Developer", description=jd)
+    assert not any("Supabase" in f for f in result.flags)
+    required = rules(profile, "Full Stack Developer", description=jd + "\nHands-on experience with Supabase is mandatory.")
+    assert any("Supabase" in f for f in required.flags)
+
+
+def test_sfcc_specialist_duties_need_verified_platform_experience(profile):
+    result = rules(profile, "Senior SFCC Developer", description=FRONTEND_JD +
+                   "\nRequirements:\n5+ years of experience developing and supporting Salesforce Commerce Cloud B2C.")
+    assert result.decision != "APPLY" and any("Commerce Cloud" in f for f in result.flags)
+
+
+async def test_clear_role_still_uses_ollama_and_checks_quoted_evidence(profile):
+    verified = "Build React dashboards."
+    provider = fake_ollama([_says_apply(requirement_quotes=[verified, "Made up requirement"],
+                                        recommended_resume="unknown", preferred_skills=["Next.js"])])
+    profile.matching.ai_for_ambiguous_only = True
+    result = await JobMatcher(profile, JobAssistant(provider)).evaluate(job("React Developer", FRONTEND_JD + verified), use_ai=True)
+    prompt = provider.calls[0]["messages"][-1]["content"]
+    assert all(f'"id": "{r.id}"' in prompt for r in profile.resumes)
+    assert result.ai["used"] and result.ai["requirement_quotes"] == [verified]
+    assert result.ai["recommended_resume"] == "" and result.ai["preferred_skills"] == ["Next.js"]
+
+
+def test_low_frontend_percentage_does_not_exclude_product_engineering_path(profile):
+    description = ("Required qualifications: Proficiency in Python, JavaScript/TypeScript, or Node.js. "
+                   "Own product features end-to-end. Other teams build AWS infrastructure, data pipelines and models.")
+    result = rules(profile, "MTS", description=description)
+    assert result.decision != "SKIP", result.blockers
+
+
+def test_recruiter_role_exits_before_detail_read_but_recruiting_product_does_not(profile):
+    assert title_prescreen(profile, "US IT Recruiter")
+    assert rules(profile, "US IT Recruiter").decision == "SKIP"
+    assert not title_prescreen(profile, "Frontend Engineer, Recruiter Platform")

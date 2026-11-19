@@ -120,6 +120,14 @@ class Answerer:
             self._ai_ok = await self.assistant.available()
         return self._ai_ok
 
+    async def repair_format(self, constraints: dict, choices: list[str]) -> str | None:
+        if not await self._ai_available():
+            return None
+        try:
+            return await self.assistant.select_field_format(constraints, choices)
+        except (AIUnavailable, AIResponseError):
+            return None
+
     async def answer(self, ctx: QuestionContext) -> Answer:
         try:
             ans = await self._answer(ctx)

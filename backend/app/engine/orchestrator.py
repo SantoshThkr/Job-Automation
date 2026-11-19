@@ -654,7 +654,10 @@ class Orchestrator:
                 if await self._memory_blocked():  # a long search must not push an exhausted machine further
                     self._event(None, "limit", f"{adapter.display_name}: search stopped - the Mac is out of memory")
                     return
-                q = SearchQuery(keywords=keywords, location=location, experience_years=years,
+                # A generic query must include junior openings too. An explicitly senior
+                # search can still use the configured portal experience filter.
+                level_years = years if re.search(r"\b(?:senior|staff|principal|lead)\b", keywords, re.I) else None
+                q = SearchQuery(keywords=keywords, location=location, experience_years=level_years,
                                 posted_within_days=self.window.search_days(), max_pages=search.max_pages_per_query,
                                 max_jobs=search.max_jobs_per_query, easy_apply_only=search.linkedin_easy_apply_only)
                 label = f"{adapter.display_name}: '{keywords}'" + (f" in {location}" if location else "")

@@ -180,3 +180,12 @@ def test_detail_distinguishes_navigation_failures_and_uncertain_submissions():
     assert _processing_stage(j)[0] == "APPLICATION_BLOCKED"
     j.application = SimpleNamespace(submit_attempted=True, confirmed=False)
     assert _processing_stage(j)[0] == "SUBMISSION_UNVERIFIED"
+
+
+def test_dry_run_validation_failure_is_visible_and_preserves_status():
+    from types import SimpleNamespace
+    from app.api.serializers import _processing_stage
+
+    job = SimpleNamespace(status="DRY_RUN", status_reason="Expected CTC: Invalid input", application=None)
+    assert _processing_stage(job)[0] == "FORM_VALIDATION_FAILED"
+    assert job.status == "DRY_RUN"

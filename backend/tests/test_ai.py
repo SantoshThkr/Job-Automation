@@ -101,3 +101,9 @@ async def test_live_ollama_job_understanding_and_answer(profile):
         assert fact.answer is None or fact.confidence < 0.75  # must not invent a passport number
     finally:
         await provider.unload()  # the model's memory is given back at once, not after its keep-alive
+
+
+@pytest.mark.parametrize("choice,expected", [(1, "15"), (0, None), (2, None), ("1", None), (True, None)])
+async def test_field_format_choice_must_identify_a_verified_representation(choice, expected):
+    assistant = JobAssistant(fake_ollama([{"choice": choice}]))
+    assert await assistant.select_field_format({"question": "Notice period in days", "error": "Digits only"}, ["15"]) == expected
