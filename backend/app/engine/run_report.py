@@ -129,12 +129,16 @@ def run_breakdown(db: Session, run_id: int, *, audit: bool = False, profile: Any
             portal_events = [e for e in events if jobs.get(e.job_id) and jobs[e.job_id].portal == portal]
             observed = {e.job_id: e.data for e in portal_events if e.type == "listing_seen"}
             details = [{"id": e.job_id, "title": jobs[e.job_id].title, "status": (e.data or {}).get("status"),
-                        "reason": e.message} for e in portal_events if e.type == "listing_seen"]
+                        "reason": e.message, "decision_source": "Discovery decision" if e.job_id in decided else "Recorded status",
+                        "recency": (e.data or {}).get("age_reason") or {"in": "Inside", "out": "Outside",
+                            "unknown": "Uncertain for"}.get((e.data or {}).get("age"), "Unrecorded for") + " this run’s posting window"
+                        } for e in portal_events if e.type == "listing_seen"]
             relevant = {j for j, d in observed.items() if d.get("domain") == "relevant"}
             fresh = {j for j, d in observed.items() if d.get("age") == "in"}
             confirmed = {e.job_id for e in portal_events if e.type == "result_applied" and
                          not (e.message or "").startswith("Verified:")}
             failures = [{"id": e.job_id, "reason": e.message} for e in portal_events if e.type == "result_failed"]
+            confirmations = [{"id": e.job_id, "reason": e.message} for e in portal_events if e.type == "result_applied"]
             unique = stats.get(f"portal.{portal}.unique", len(observed))
             sightings = stats.get(f"portal.{portal}.sightings", unique)
             metrics = {
@@ -163,7 +167,8 @@ def run_breakdown(db: Session, run_id: int, *, audit: bool = False, profile: Any
                 metrics["Skips upheld by audit"] = checked["still_skipped"]
                 metrics["Previously skipped, now eligible for matching"] = checked["would_apply"]
                 metrics["Skips requiring another look"] = checked["would_read_first"] + checked["would_put_to_you"]
-            out["portal_metrics"][portal] = {"metrics": metrics, "failures": failures, "listings": details}
+            out["portal_metrics"][portal] = {"metrics": metrics, "failures": failures, "confirmations": confirmations,
+                                             "listings": details}
     if audit and profile is not None:
         out["audit"] = audit_skips(profile, [jobs[j] for j, (o, _w, _s) in decided.items()
                                              if o in {"skipped", "skipped_title"} and j in jobs])

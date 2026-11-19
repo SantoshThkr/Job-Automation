@@ -32,8 +32,11 @@ def _seed(site_server, n: int) -> list[int]:
         for q, a in [("What is your blood group?", "O+"), ("Work Authorization", "Citizen"),
                      ("GraphQL experience (years)", "2")]:
             remember_answer(s, q, a)
+        # Exercise all six workflows, then balance the sample across the three portals.
+        # Two cycles give 24 applications with eight per portal.
+        cycle = [*FLOWS, *([FLOWS[2], FLOWS[3]] * 3)]
         for i in range(n):
-            portal, path, prefix = FLOWS[i % len(FLOWS)]
+            portal, path, prefix = cycle[i % len(cycle)]
             ext = path.rstrip("/").split("-")[-1] if portal == "naukri" else path.rstrip("/").split("/")[-1].split("-")[1] \
                 if portal == "instahyre" else path.rstrip("/").split("/")[-1]
             job, _ = upsert_job(s, JobPosting(portal=portal, external_id=f"{ext}" if i < len(FLOWS) else f"{ext}-{i}",

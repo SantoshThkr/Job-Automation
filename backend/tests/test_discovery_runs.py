@@ -128,3 +128,28 @@ def test_queries_are_compiled_for_each_portal():
     assert frontend_queries("linkedin", configured) == ["React Developer", "Next.js Engineer"]
     assert frontend_queries("instahyre", configured) == ["React", "Next.js"]
     assert frontend_queries("naukri", configured) == ["React Developer", "Next.js Engineer"]
+
+
+def test_fullstack_searches_reach_portals_and_do_not_use_frontend_only_function():
+    from urllib.parse import parse_qs, urlsplit
+    from app.portals.base import SearchQuery
+    from app.portals.instahyre import InstahyreAdapter
+    from app.portals.queries import frontend_queries
+    terms = ["Full Stack Engineer", "MERN Developer", "Full Stack AI Engineer"]
+    unrelated = ["React Sales Manager", "Graphic Designer JavaScript", "TypeScript Accountant",
+                 "React Native Developer", "Full Stack Mobile Engineer"]
+    assert frontend_queries("naukri", terms + unrelated) == terms
+    adapter = InstahyreAdapter(None, "https://example.test")
+    queries = frontend_queries("instahyre", terms + unrelated)
+    params = [parse_qs(urlsplit(adapter.search_url(SearchQuery(q, location="London"))).query) for q in queries]
+    assert [q["skills"][0] for q in params] == ["React", "MERN", "Generative AI"]
+    assert all("job_functions" not in q and q["location"] == ["London"] for q in params)
+
+
+def test_remote_linkedin_search_keeps_the_selected_age_filter():
+    from urllib.parse import parse_qs, urlsplit
+    from app.portals.base import SearchQuery
+    from app.portals.linkedin import LinkedInAdapter
+    adapter = LinkedInAdapter(None, "https://example.test")
+    params = parse_qs(urlsplit(adapter.search_url(SearchQuery("React", "Remote", posted_within_days=14), 1)).query)
+    assert params["f_WT"] == ["2"] and "location" not in params and params["f_TPR"] == ["r1209600"]

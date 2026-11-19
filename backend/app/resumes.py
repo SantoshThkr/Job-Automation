@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
+from pypdf import PdfReader
+
 from app.config import PROJECT_ROOT, get_settings
+from app.matching.skills import canonicalize, extract_skills
 from app.profile import Profile, ProfileStore, ResumeEntry
 
 ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx"}
@@ -38,27 +42,60 @@ def list_resumes(profile: Profile) -> list[ResumeInfo]:
     return out
 
 
-def select_resume(profile: Profile, category: str = "", skills: list[str] | None = None) -> ResumeEntry | None:
-    """Pick the resume whose tags best fit the job category/skills. Only existing files qualify."""
-    candidates = [r for r in profile.resumes if r.absolute_path.is_file()]
-    if not candidates:
+@lru_cache(maxsize=32)
+def _document_skills(path: Path, modified_ns: int, size: int) -> frozenset[str] | None:
+    if path.suffix.lower() != ".pdf":
         return None
-    wanted = {category.lower()} if category else set()
-    wanted |= {s.lower() for s in (skills or [])}
+    try:
+        reader = PdfReader(path)
+        listed = set()
+        for page in reader.pages:
+            for line in (page.extract_text() or "").splitlines():
+                heading, colon, items = line.strip().partition(":")
+                if colon and re.fullmatch(r"front[ -]?end|back[ -]?end(?:/integration)?|generative ai|databases|"
+                                          r"cloud\s*&\s*devops|testing\s*&\s*(?:quality|practices)|"
+                                          r"stack|technologies\s+used|(?:technical\s+)?skills", heading, re.I):
+                    listed.update(extract_skills(re.split(r"\(integrat(?:ed|ion) with", items, flags=re.I)[0]))
+        return frozenset(listed)
+    except Exception:
+        # Uploaded documents can be encrypted, damaged or image-only. Their configured tags still apply.
+        return None
 
-    def score(r: ResumeEntry) -> tuple[int, int]:
-        tags = {t.lower() for t in r.tags}
-        overlap = len(tags & wanted)
-        # category match counts double
-        if category and category.lower() in tags:
-            overlap += 2
-        return overlap, 1 if r.default else 0
 
-    best = max(candidates, key=score)
-    if score(best)[0] == 0:
-        default = next((r for r in candidates if r.default), None)
-        return default or best
-    return best
+def resume_skills(resume: ResumeEntry) -> frozenset[str]:
+    path = resume.absolute_path
+    if not path.is_file():
+        return frozenset()
+    stat = path.stat()
+    return _document_skills(path, stat.st_mtime_ns, stat.st_size) or frozenset()
+
+
+def rank_resumes(profile: Profile, category: str, skills: list[str], required: list[str]) -> list[dict]:
+    wanted = {canonicalize(s) for s in skills}
+    mandatory = {canonicalize(s) for s in required}
+    ranked = []
+    for resume in profile.resumes:
+        path = resume.absolute_path
+        if not path.is_file():
+            continue
+        document = resume_skills(resume)
+        evidence = {canonicalize(s) for s in resume.tags} | set(document or ())
+        matched = sorted(evidence & wanted)
+        matched_required = sorted(evidence & mandatory)
+        family = re.sub(r"[ -]", "", category.lower())
+        labels = [re.sub(r"full[ -]stack", "fullstack", t.lower()) for t in
+                  (resume.id, resume.label, *resume.tags)]
+        family_match = bool(family and any(re.search(r"\b" + re.escape(family) + r"\b", t) for t in labels))
+        score = len(matched) + 2 * len(matched_required) + 4 * family_match
+        ranked.append({"id": resume.id, "score": score, "matched": matched, "matched_required": matched_required,
+                       "source": "PDF and tags" if document else "configured tags", "default": resume.default,
+                       "category_match": family_match, "designated": resume.id.casefold() == family})
+    return sorted(ranked, key=lambda r: (r["score"], r["designated"], r["default"]), reverse=True)
+
+
+def select_resume(profile: Profile, category: str = "", skills: list[str] | None = None) -> ResumeEntry | None:
+    ranked = rank_resumes(profile, category, skills or [], [])
+    return get_resume(profile, ranked[0]["id"]) if ranked else None
 
 
 def get_resume(profile: Profile, resume_id: str | None) -> ResumeEntry | None:

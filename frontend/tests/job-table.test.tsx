@@ -38,7 +38,7 @@ describe("the job table", () => {
     expect(within(row).getByTestId("status-reason").textContent).toBe(why);
   });
 
-  it("explains every status that means 'not applied to', and leaves the others clean", () => {
+  it("shows recorded reasons for reviews, failures and confirmations", () => {
     render(<JobTable jobs={[
       job({ id: 1, title: "A", status: "REVIEW_PENDING", status_reason: "Full-stack role is backend-heavy (frontend ≈ 44%)" }),
       job({ id: 2, title: "B", status: "MANUAL_ACTION_REQUIRED", status_reason: "Questions need your answers" }),
@@ -49,7 +49,7 @@ describe("the job table", () => {
     ]} />);
     const reasons = screen.getAllByTestId("status-reason").map((e) => e.textContent);
     expect(reasons).toEqual(["Full-stack role is backend-heavy (frontend ≈ 44%)", "Questions need your answers",
-      "The company's site did not load"]);
+      "The company's site did not load", "Applied with LinkedIn Easy Apply"]);
     expect(screen.getByText("Needs decision")).toBeTruthy(); // REVIEW_PENDING: whether to apply is your call
   });
 });

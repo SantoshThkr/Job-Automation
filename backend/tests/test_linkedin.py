@@ -174,7 +174,7 @@ async def test_component_search_card(linkedin, engine, monkeypatch):
         await engine.page.set_content("""
           <main><div role="button" componentkey="job-card-component-ref-98765">
           <p><span>Selected, Senior React Engineer</span><span aria-hidden="true">Senior React Engineer</span></p>
-          <p>Acme</p><p>Noida</p><p>Posted 6 hours ago</p><p>Easy Apply</p></div></main>""")
+          <p>Acme</p><p>Noida</p><p><time datetime="2026-05-12T09:00:00Z">Posted 6 hours ago</time></p><p>Easy Apply</p></div></main>""")
 
     monkeypatch.setattr(engine, "goto", show_search)
     cards = [c async for c in linkedin.search(SearchQuery("React Engineer", max_pages=1))]
@@ -183,3 +183,4 @@ async def test_component_search_card(linkedin, engine, monkeypatch):
     assert (job.external_id, job.title, job.company, job.posted_text) == (
         "98765", "Senior React Engineer", "Acme", "Posted 6 hours ago")
     assert job.easy_apply and not job.already_applied
+    assert job.posted_at.isoformat() == "2026-05-12T09:00:00"

@@ -731,9 +731,10 @@ class Orchestrator:
                     (analysis.get("frontend_ratio") or 0) >= self.profile.job_preferences.min_frontend_ratio):
                 domain = "relevant"
             posted = posted_of(job)
-            age = verdict(posted, self.window)[0] if posted else "unknown"
+            age, age_reason = verdict(posted, self.window)
             add_event(s, job.id, "listing_seen", job.status_reason or job.status, run_id=self.run_id,
-                      data={"age": age, "domain": domain, "status": job.status})
+                      data={"age": age, "age_reason": age_reason, "window": self.window.label(),
+                            "domain": domain, "status": job.status})
 
 
     def _mark_error(self, posting: JobPosting, exc: Exception, shot: str | None) -> None:

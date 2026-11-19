@@ -69,10 +69,15 @@ export function RunBreakdown({ runId }: { runId: number }) {
         {Object.entries(data.portal_metrics).map(([portal, row]) => row.listings?.length ? (
           <details key={portal}><summary>{PORTAL_LABEL[portal]} listing decisions ({row.listings.length})</summary>
             <ul className="list small">{row.listings.map(job => (
-              <li key={job.id}><Link href={`/jobs/${job.id}`}>{job.title}</Link> · {job.status} · {job.reason}</li>
+              <li key={job.id}><Link href={`/jobs/${job.id}`}>{job.title}</Link> · {job.decision_source ?? "Recorded status"} · {job.status} · {job.reason}{job.recency && <div>{job.recency}</div>}</li>
             ))}</ul>
           </details>
         ) : null)}
+        {Object.entries(data.portal_metrics).flatMap(([portal, row]) => (row.confirmations ?? []).map((c, index) => (
+          <p key={portal + "-confirmation-" + index} className="small">
+            <Link href={`/jobs/${c.id}`}>{PORTAL_LABEL[portal]} #{c.id}</Link> · Confirmation · {c.reason}
+          </p>
+        )))}
         {Object.entries(data.portal_metrics).flatMap(([portal, row]) => row.failures.map((f, index) => (
           <p key={portal + index} className="small"><Link href={`/jobs/${f.id}`}>{PORTAL_LABEL[portal]} #{f.id}</Link> · {f.reason}</p>
         )))}

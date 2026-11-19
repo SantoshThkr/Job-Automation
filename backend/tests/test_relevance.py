@@ -153,9 +153,12 @@ def test_senior_title_with_a_junior_field_and_a_silent_description_is_yours_to_d
     ("React Developer", FRONTEND_JD + "\n2 to 5 years of experience", "0 - 2 years"),  # the description agrees
     ("Frontend Developer", FRONTEND_JD, "1-2 Yrs"),  # nothing contradicts the field
 ])
-def test_genuinely_junior_roles_are_still_skipped(profile, title, description, experience):
+def test_advertised_range_is_weighted_and_an_explicit_junior_role_is_excluded(profile, title, description, experience):
     r = rules(profile, title, description=description, experience=experience)
-    assert r.decision == "SKIP" and any(b.startswith("Role targets") for b in r.blockers), (r.decision, r.blockers, r.flags)
+    if title.startswith("Junior"):
+        assert r.decision == "SKIP" and any(b.startswith("Role targets") for b in r.blockers)
+    else:
+        assert r.decision == "APPLY" and not r.blockers
 
 
 # ------------------------------------------------------------------ what the local model may decide
@@ -432,3 +435,78 @@ def test_frontend_machine_learning_product_title_is_read(profile):
     title = "Senior Frontend Engineer - Machine Learning Products"
     assert not title_prescreen(p, title) and rules(p, title).decision == "APPLY"
     assert title_prescreen(p, "Senior Machine Learning Engineer")
+
+
+def test_search_tags_and_keywords_cannot_establish_mandatory_skills(profile):
+    from app.matching.analyzer import analyze_job
+    listing = job("Bulk Hiring ReactJS18 Developers", FRONTEND_JD +
+                  "\nKeywords: Java, Spring Boot\nPreferred: Django\nReact is essential.",
+                  skills=["Java", "Spring Boot", "Django"])
+    a = analyze_job(listing)
+    assert a.title_category == "frontend"
+    assert "React" in a.required_skills
+    assert not {"Java", "Spring Boot", "Django"} & a.required_skills
+    assert JobMatcher(profile).evaluate_rules_only(listing).decision == "APPLY"
+    listing.description += "\nMandatory Key Skills\nJava, Spring Boot"
+    assert {"Java", "Spring Boot"} <= analyze_job(listing).required_skills
+
+
+def test_mandatory_cap_and_backend_alternatives(profile):
+    assert rules(profile, "React Developer", description=FRONTEND_JD +
+                 "\nMaximum 3 years of total experience").decision == "SKIP"
+    profile.skills.secondary += ["FastAPI"]
+    jd = "Requirements:\nReact, TypeScript, Python, FastAPI / Flask / Django\nBuild React interfaces. Develop backend APIs."
+    result = rules(profile, "Full Stack AI Engineer", description=jd)
+    assert "Django" not in result.missing_skills
+    assert "Django" in rules(profile, "Full Stack AI Engineer", description=jd + "\nDjango is mandatory.").missing_skills
+    assert not title_prescreen(profile, "Full Stack React and Java Developer")
+    assert not title_prescreen(profile, "Web Developer (Marketing Technology)")
+    assert title_prescreen(profile, "Full Stack Mobile Application Developer")
+
+
+def test_ranking_compares_all_available_documents_and_uses_explicit_skill_lists(profile, tmp_path, monkeypatch):
+    from app import resumes
+    from app.profile import ResumeEntry
+    p = tmp_path / "ai.pdf"
+    p.write_bytes(b"test")
+    profile.resumes.append(ResumeEntry(id="ai", path=str(p), tags=["AI"]))
+    class Page:
+        def extract_text(self):
+            return "Backend: FastAPI, NestJS\nStack: React (integrated with Java/Spring Boot)"
+    class Reader:
+        def __init__(self, path):
+            self.pages = [Page()] if path == p else []
+    monkeypatch.setattr(resumes, "PdfReader", Reader)
+    raw = profile.model_dump()
+    result = rules(profile, "Full Stack AI Engineer", description=FRONTEND_JD + "\nRequirements:\nNestJS, RAG, AI agents")
+    assert len(result.resume_comparison) == 3
+    row = next(row for row in result.resume_comparison if row["id"] == "ai")
+    assert "NestJS" in row["matched_required"] and "NestJS" in result.matched_skills
+    assert "Java" not in resumes.resume_skills(profile.resumes[-1])
+    assert raw == profile.model_dump()
+
+
+def test_full_stack_duties_and_flexible_location(profile):
+    profile.work_preferences.willing_to_relocate = True
+    profile.skills.secondary += ["FastAPI", "Python"]
+    jd = ("Responsibilities:\nDevelop React interfaces. Build backend APIs.\nRequirements:\nReact, Python, FastAPI, "
+          "PostgreSQL, Redis, AWS, Docker, Kubernetes, SQL, REST APIs, GraphQL, MongoDB.")
+    r = rules(profile, "Full Stack Developer", description=jd, location="Lisbon, Portugal")
+    assert not r.blockers and not any("backend-heavy" in f for f in r.flags)
+    assert any("Lisbon" in s for s in r.reasons)
+    r = rules(profile, "Engineering Manager", description="Lead and scale engineering teams. " + FRONTEND_JD)
+    assert any("Management role" in b for b in r.blockers)
+
+
+def test_preferred_web_stack_does_not_promote_cloud_migration(profile):
+    result = rules(profile, "Python Full Stack Engineer", description="Mandatory skills: Python, AWS\n"
+                   "Preferred Skills\nReact, JavaScript\nCloud migration and cloud-based applications and pipelines.")
+    assert result.decision == "SKIP" and any("Cloud role" in b for b in result.blockers)
+
+
+def test_score_only_review_explains_threshold_and_weakest_components(profile):
+    profile.matching.apply_threshold = 100
+    result = rules(profile, "React Developer", experience="1-3 years")
+    assert result.decision == "MANUAL_REVIEW" and not result.flags
+    reason = decision_reason(result, 100)
+    assert "automatic threshold 100" in reason and "experience" in reason

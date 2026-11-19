@@ -165,7 +165,7 @@ describe("a job's posting date", () => {
       <PostedCell job={job({ id: 2, closed_reason: "the listing's own end date (2026-09-23) has passed", recency: "out" })} />
       <PostedCell job={job({ id: 3, posted_age_days: 21.2, posted_open_ended: true, recency: "unknown" })} />
     </>);
-    expect(screen.getAllByTestId("posted-flag").map((e) => e.textContent)).toEqual(["Too old", "Closed", "Unsure"]);
+    expect(screen.getAllByTestId("posted-flag").map((e) => e.textContent)).toEqual(["Outside window", "Closed", "Unsure"]);
     expect(screen.getByText("21+ days ago")).toBeTruthy();
     expect(screen.getByText(/^on\/before /)).toBeTruthy();
   });

@@ -232,12 +232,12 @@ def verdict(posted: Posted | None, window: Window, *, now: datetime | None = Non
     shown = describe(posted, now=now)
     if window.start or window.end:
         day, first = posted.local_date(), posted.earliest_date()
-        if window.end and first > window.end:
+        if window.end and first > window.end and not posted.open_ended:
             return "out", f"posted {shown}: after your date range ({window.label()})"
         if window.start and day < window.start:
             return "out", f"posted {shown}: before your date range ({window.label()})"
-        if posted.open_ended:
-            return "unknown", f"posted {shown}: it may also be older than {window.start} - yours to decide"
+        if posted.open_ended and (window.start or (window.end and day > window.end)):
+            return "unknown", f"posted {shown}: the listing gives only a lower bound on age for {window.label()}"
         if (window.end and day > window.end) or (window.start and first < window.start):
             return "unknown", (f"posted {shown}: the listing's label is precise only to {_precision(posted.spread_s)}, "
                                f"so it may lie outside {window.label()} - yours to decide")
@@ -291,6 +291,13 @@ def listing_closed(job: Any, *, now: datetime | None = None) -> str:
     """'' or why the listing is closed whatever its age: its own end date ("validThrough") has passed."""
     end = getattr(job, "valid_through", None)
     now = now or utcnow()
+    if end is None:
+        # Some job pages print a labelled closing date only in the job description.
+        deadline = re.search(r"(?im)^\s*Job Posting End Date:\s*([A-Za-z]+ \d{1,2}, \d{4})\s*$",
+                             getattr(job, "description", "") or "")
+        if deadline and (posted := parse_date(deadline[1], now=now)):
+            if posted.local_date() < now.replace(tzinfo=UTC).astimezone(local_tz()).date():
+                return f"the listing's own end date ({posted.local_date().isoformat()}) has passed"
     if end is not None and end < now:
         return f"the listing's own end date ({end.date().isoformat()}) has passed"
     return ""

@@ -112,6 +112,13 @@ def test_portal_conversion_uses_the_discovery_cohort(clean_db):
                       data={"age": age, "domain": "relevant", "status": job.status})
         for job in [linked, backlog]:
             add_event(db, job.id, "result_applied", "Application received", run_id=run.id)
-        metrics = run_breakdown(db, run.id)["portal_metrics"]["linkedin"]["metrics"]
+        add_event(db, uncertain.id, "evaluated", "MANUAL_REVIEW (score 80): Unknown posting date", run_id=run.id)
+        portal = run_breakdown(db, run.id)["portal_metrics"]["linkedin"]
+        rows = {row["id"]: row for row in portal["listings"]}
+        assert rows[linked.id]["decision_source"] == "Recorded status"
+        assert rows[uncertain.id]["decision_source"] == "Discovery decision"
+        assert rows[linked.id]["recency"] == "Inside this run’s posting window"
+        assert {c["id"] for c in portal["confirmations"]} == {linked.id, backlog.id}
+        metrics = portal["metrics"]
         assert metrics["Confirmed"] == 2 and metrics["Relevant conversion (%)"] == 50
         assert metrics["Repeat sightings"] == 2 and metrics["Fresh and relevant (%)"] == 50

@@ -13,7 +13,7 @@ from app.matching.analyzer import JobInput, analyze_job
 from app.matching.rules import MatchResult, evaluate_rules, preferences_rev
 from app.models import Decision
 from app.profile import Profile
-from app.resumes import select_resume
+from app.resumes import rank_resumes
 
 log = logging.getLogger(__name__)
 
@@ -122,5 +122,6 @@ class JobMatcher:
                               f"frontend {u.frontend_percentage}%, confidence {u.confidence:.2f})")
 
     def _attach_resume(self, result: MatchResult) -> None:
-        resume = select_resume(self.profile, result.resume_category or result.category, result.matched_skills)
-        result.resume_id = resume.id if resume else None
+        result.resume_comparison = rank_resumes(self.profile, result.resume_category or result.category,
+                                                list(result.analysis["skills"]), result.analysis["required_skills"])
+        result.resume_id = result.resume_comparison[0]["id"] if result.resume_comparison else None

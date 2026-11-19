@@ -210,6 +210,7 @@ export interface MatchDetails {
   analysis?: Record<string, unknown>;
   ai?: Record<string, unknown> | null;
   resume_id?: string | null;
+  resume_comparison?: {id: string; source: string; matched: string[]; matched_required: string[]}[];
   /** structured reasons: a stable code, blocker (never applied to on its score) or flag (yours to decide), the text */
   codes?: { code: string; kind: "blocker" | "flag"; text: string }[];
   /** "rules", "rules+ai", with "(uncertain)" when the decision is left to you */
@@ -344,7 +345,8 @@ export interface RunBreakdown {
   portal_metrics?: Record<string, {
     metrics: Record<string, number | null>;
     failures: { id: number; reason: string }[];
-    listings?: { id: number; title: string; status: string; reason: string }[];
+    confirmations?: { id: number; reason: string }[];
+    listings?: { id: number; title: string; status: string; reason: string; decision_source?: string; recency?: string }[];
   }>;
   run: { id: number; mode: string; status: string; portals: string[] };
   funnel: {

@@ -44,6 +44,7 @@ CARD_FIELDS = {
     "footer": [".job-card-container__footer-wrapper", "ul.job-card-list__footer-wrapper", ".job-card-container__footer-item"],
 }
 CARD_ATTRS = {
+    "posted_iso": (["time[datetime]"], "datetime"),
     "occ_id": ([":self"], "data-occludable-job-id"),
     "job_id": ([":self", "[data-job-id]"], "data-job-id"),
     "href": (["a.job-card-list__title--link", "a.job-card-list__title", "a.job-card-container__link", "a[href*='/jobs/view/']"], "href"),
@@ -213,7 +214,9 @@ class LinkedInAdapter(PortalAdapter):
     # ------------------------------------------------------------ search
     def search_url(self, q: SearchQuery, page_no: int) -> str:
         params: dict[str, str | int] = {"keywords": q.keywords, "sortBy": "DD"}
-        if q.location:
+        if q.location.strip().lower() == "remote":
+            params["f_WT"] = "2"
+        elif q.location:
             params["location"] = q.location
         if q.posted_within_days:
             params["f_TPR"] = f"r{int(q.posted_within_days) * 86400}"
@@ -251,6 +254,7 @@ class LinkedInAdapter(PortalAdapter):
                         job_id: card.getAttribute('componentkey').match(/^job-card-component-ref-(\d+)$/)?.[1],
                         title: text(lines[0]?.querySelector('[aria-hidden=true]')) || text(lines[0]).split('\n').pop(),
                         company: text(lines[1]), location: text(lines[2]), footer: footer.join(' '),
+                        posted_iso: card.querySelector("time[datetime]")?.dateTime,
                         posted: footer.find(s => /^(?:posted |reposted )?\d+\+? (?:minutes?|hours?|days?|weeks?|months?) ago/i.test(s)) || ''
                     };
                 })""")
@@ -279,8 +283,12 @@ class LinkedInAdapter(PortalAdapter):
         if not job_id or not title:
             return None
         footer = (c.get("footer") or "") + " " + (c.get("_text") or "")
+        from app.matching.posting import parse_date
+
+        posted = parse_date(c.get("posted_iso") or "")
         return JobPosting(portal=self.name, external_id=str(job_id), url=f"{self.base_url}/jobs/view/{job_id}/",
                           title=re.sub(r"\s+with verification$", "", title), company=c.get("company", ""),
+                          posted_at=posted.at if posted else None, posted_date_only=bool(posted and posted.date_only),
                           posted_text=c.get("posted", ""), location=c.get("location", ""), easy_apply="Easy Apply" in footer,
                           already_applied=bool(re.search(r"\bApplied\b", c.get("footer") or "")))
 

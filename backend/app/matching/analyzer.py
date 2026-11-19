@@ -45,6 +45,7 @@ class JobAnalysis:
     experience_source: str = ""  # "listing" (the portal's experience field) | "description" | ""
     experience_note: str = ""  # set when the listing's field and the rest of the posting disagree
     experience_conflict: bool = False  # the field says junior, the title says senior, the description is silent
+    optional_skills: set[str] = field(default_factory=set)
     # the evidence behind frontend_ratio: what the description itself names (frontend_ratio also weighs the title in)
     frontend_skills: list[str] = field(default_factory=list)
     backend_skills: list[str] = field(default_factory=list)
@@ -56,6 +57,7 @@ class JobAnalysis:
             "title_seniority": self.title_seniority,
             "skills": self.skills,
             "required_skills": sorted(self.required_skills),
+            "optional_skills": sorted(self.optional_skills),
             "frameworks": sorted(self.frameworks),
             "frontend_ratio": None if self.frontend_ratio is None else round(self.frontend_ratio, 2),
             "category_weights": {k: round(v, 2) for k, v in self.category_weights.items()},
@@ -78,11 +80,11 @@ class JobAnalysis:
 # ---------------------------------------------------------------- title ---
 
 _TITLE_CATEGORIES: list[tuple[str, str]] = [
-    ("fullstack", r"full[\s-]?stack|\bmern\b|\bmean\s+stack\b"),
     ("qa", r"\bqa\b|\bsdet\b|quality\s+(?:assurance|engineer)|\btest(?:ing)?\s+(?:engineer|analyst|lead)\b|\bautomation\s+test|\btester\b|"
            r"engineer\s+in\s+test\b"),
     # ("mobile web" / "mobile-first" is the web, seen on a phone)
     ("mobile", r"\bandroid\b|\bios\b|\bmobile\b(?![\s-]*(?:web|first|responsive|friendly))|\bflutter\b|react[\s-]*native|\bswift\b|\bkotlin\b"),
+    ("fullstack", r"full[\s-]?stack|\bmern\b|\bmean\s+stack\b"),
     ("devops", r"\bdevops\b|\bsre\b|site\s+reliability|\bcloud\s+(?:engineer|architect)\b|\bplatform\s+engineer\b|\binfrastructure\b|\bdevsecops\b"),
     # ("AI Engineer" is not here: in 2026 it usually means building LLM applications - often a full-stack TypeScript /
     # Python role - and its description decides. Run 76 skipped twelve of them from the title alone, unread.)
@@ -134,6 +136,7 @@ def _tidy_title(title: str) -> str:
     (a .NET role that passed the '.net' exclusion and was queued), "Node Js Developer" (whose "Js" read as
     JavaScript made a backend role look like a frontend one)."""
     t = re.sub(r"(?<![\w.])\.\s+net\b", ".net", title or "", flags=re.I)
+    t = re.sub(r"\breact(?:\.?js)?\s*v?\d+(?:\.\d+)*\b", "React", t, flags=re.I)
     return re.sub(r"\b(node|nest|express)[\s.]+js\b", r"\1js", t, flags=re.I)
 
 
@@ -461,13 +464,13 @@ def required_skills_from_sections(description: str) -> tuple[set[str], set[str],
             optional |= set(extract_skills(stripped))
             continue
         skills = set(extract_skills(stripped))
-        if section == "required":
+        if section == "required" or re.search(r"\b(?:is|are) (?:essential|mandatory|required)\b", stripped, re.I):
             required |= skills
         elif section == "optional":
             optional |= skills
         else:
             elsewhere |= skills
-    return required, optional - required - elsewhere, found_sections
+    return required, optional - required, found_sections
 
 
 # ------------------------------------------------------------- analysis ---
@@ -477,19 +480,19 @@ _TITLE_PRIOR = {"frontend": 0.95, "fullstack": 0.5, "generic": 0.5, "other": 0.4
 
 
 def analyze_job(job: JobInput) -> JobAnalysis:
-    text = f"{job.title}\n{job.description}"
+    description = re.sub(r"(?im)^\s*keywords\s*:[^\n]*", "", job.description)
+    text = f"{job.title}\n{description}"
     skills = extract_skills(text)
     for tag in job.skills:
         canon = canonicalize(tag)
         if skill_def(canon):
             skills[canon] = skills.get(canon, 0) + 1
 
-    required, optional, sections = required_skills_from_sections(job.description)
-    tag_skills = {canonicalize(t) for t in job.skills if skill_def(canonicalize(t))}
+    required, optional, sections = required_skills_from_sections(description)
     title_skills = set(extract_skills(job.title))
     if not sections:
-        required = {s for s, n in skills.items() if n >= 2 and s not in optional}
-    required |= title_skills | (tag_skills - optional)
+        required = {s for s, n in extract_skills(description).items() if n >= 2 and s not in optional}
+    required |= title_skills
     optional -= required
     skills = {name: count for name, count in skills.items() if name not in optional}
     signal_only = {s.name for s in all_skills() if s.signal_only}
@@ -527,6 +530,7 @@ def analyze_job(job: JobInput) -> JobAnalysis:
         title_seniority=title_seniority(job.title),
         skills={k: v for k, v in sorted(skills.items(), key=lambda kv: -kv[1])},
         required_skills=required,
+        optional_skills=optional,
         frameworks=frameworks,
         frontend_ratio=None if ratio is None else max(0.0, min(1.0, ratio)),
         category_weights=weights,

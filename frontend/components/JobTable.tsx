@@ -6,7 +6,7 @@ import { PORTAL_LABEL, fmtDate, postedAge } from "@/lib/format";
 import { Score, StatusBadge } from "./StatusBadge";
 
 // statuses whose reason answers "why was this not applied to?" - shown in the row, not only in a tooltip
-const EXPLAINED = new Set(["SKIPPED", "REVIEW_PENDING", "MANUAL_ACTION_REQUIRED", "FAILED", "DUPLICATE", "EXPIRED"]);
+const EXPLAINED = new Set(["SKIPPED", "REVIEW_PENDING", "MANUAL_ACTION_REQUIRED", "FAILED", "APPLIED", "ALREADY_APPLIED", "DUPLICATE", "EXPIRED"]);
 
 /** When the job was posted (never when it was found) and where it stands against the job-recency window. */
 export function PostedCell({ job }: { job: JobSummary }) {
@@ -14,7 +14,7 @@ export function PostedCell({ job }: { job: JobSummary }) {
     return <span className="muted" title={job.recency_reason || "The portal did not show when this job was posted"}>Unknown</span>;
   }
   const day = fmtDate(job.posted_at, false); // a date-only posting is stored at noon, so its day never shifts
-  const flag = job.closed_reason ? "Closed" : job.recency === "out" ? "Too old" : job.recency === "unknown" ? "Unsure" : "";
+  const flag = job.closed_reason ? "Closed" : job.recency === "out" ? "Outside window" : job.recency === "unknown" ? "Unsure" : "";
   return (
     <span title={[job.posted_label, job.closed_reason, job.recency_reason].filter(Boolean).join(" · ")}>
       <span data-testid="posted-age">{postedAge(job.posted_age_days, job.posted_open_ended)}</span>
@@ -37,7 +37,7 @@ export function JobTable({ jobs, compact = false }: { jobs: JobSummary[]; compac
             <th>Portal</th>
             {!compact && <th>Location</th>}
             <th className="num">Match</th>
-            <th>Status</th>
+            <th>Recorded status</th>
             <th>Posted</th>
             <th>{compact ? "Date" : "Updated"}</th>
             {!compact && <th>Resume</th>}

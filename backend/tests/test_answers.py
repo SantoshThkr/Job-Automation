@@ -230,3 +230,12 @@ async def test_state_management_is_not_the_state_you_live_in(answerer, profile):
 async def test_general_areas_still_use_your_years(answerer, profile, question):
     a = await answerer.answer(q(question))
     assert a.value is not None and float(a.value) > 0
+
+
+def test_work_authorization_uses_the_job_country_and_leaves_unspecified_remote_unknown(profile):
+    from app.answers.question_bank import QuestionContext, h_authorization
+    from app.matching.analyzer import JobInput
+    q = "are you authorized to work in this location?"
+    for location, expected in [("Remote - Canada", "No"), ("London", "No"), ("Pune", "Yes"), ("Remote", None)]:
+        ctx = QuestionContext(q, "radio", ["Yes", "No"], job=JobInput("React Developer", location=location))
+        assert h_authorization(ctx, profile, q).value == expected

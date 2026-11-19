@@ -65,7 +65,7 @@ export default function JobDetailPage() {
 
       {j.status_reason && (
         <div className={`alert ${j.status === "FAILED" ? "err" : j.status === "APPLIED" ? "info" : "warn"}`}>
-          <div className="title">Status: {j.status.replaceAll("_", " ").toLowerCase()}</div>
+          <div className="title">Recorded status: {j.status.replaceAll("_", " ").toLowerCase()}</div>
           <p>{j.status_reason}</p>
         </div>
       )}
@@ -150,9 +150,9 @@ function JobInfo({ j }: { j: JobDetail }) {
           {j.posted_label || "Unknown - the portal did not show when it was posted"}
           {j.posted_text && j.posted_source !== "page" && <div className="muted small">Listing said &ldquo;{j.posted_text}&rdquo; when found</div>}
           {j.closed_reason && <div className="small lvl-error">Closed: {j.closed_reason}</div>}
-          {j.recency && j.recency !== "in" && j.recency_reason && (
-            <div className={`small ${j.recency === "out" ? "lvl-error" : "lvl-warning"}`}>
-              {j.recency === "out" ? "Not applied: " : "Not applied automatically: "}{j.recency_reason}
+          {j.recency && j.recency_reason && (
+            <div className={`small ${j.recency === "out" ? "lvl-error" : j.recency === "unknown" ? "lvl-warning" : "muted"}`}>
+              Current posting window · {j.recency_reason}
             </div>
           )}
         </dd>
@@ -216,6 +216,10 @@ function MatchExplanation({ j }: { j: JobDetail }) {
           frontend {String(ai.frontend_percentage)}%, confidence {Number(ai.confidence).toFixed(2)} ({String(ai.effect ?? "")})
         </p>
       ) : <p className="small muted">{String(ai?.reason ?? "Not used")}</p>}
+      {m.resume_comparison && m.resume_comparison.length > 0 && <details><summary>Resume comparison</summary>
+        <ul>{m.resume_comparison.map(r => <li key={r.id}>{r.id} · {r.source} · {r.matched.length} matching skills.
+          Required skills found: {r.matched_required.join(", ") || "none"}</li>)}</ul>
+      </details>}
       {m.resume_id && <p className="small">Recommended resume: <strong>{m.resume_id}</strong></p>}
     </div>
   );

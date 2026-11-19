@@ -755,3 +755,13 @@ async def test_the_portals_own_dates_are_read_from_a_real_page(tmp_path):
         assert (await final_check(recorded_fresh, Window(days=7), e.page, unknown_blocks=True)).startswith("the job is closed")
     finally:
         await e.stop()
+
+
+def test_end_only_window_for_an_open_ended_label_and_printed_closing_date():
+    from types import SimpleNamespace
+    from app.matching.posting import listing_closed
+    w = Window(days=None, end=date(2026, 9, 15))
+    assert verdict(Posted(datetime(2026, 9, 10), open_ended=True), w, now=NOW)[0] == "in"
+    assert verdict(Posted(datetime(2026, 9, 20), open_ended=True), w, now=NOW)[0] == "unknown"
+    assert "2026-06-22" in listing_closed(SimpleNamespace(description="Job Posting End Date:\n\nJune 22, 2026"), now=NOW)
+    assert not listing_closed(SimpleNamespace(description="Project started June 22, 2026"), now=NOW)

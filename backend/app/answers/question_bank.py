@@ -813,15 +813,18 @@ def _countries_in(q: str) -> list[str]:
     return list(dict.fromkeys(_COUNTRY_ALIAS.get(k, k) for k in found))
 
 
-def _work_country(ctx, q: str, authorized: list[str]) -> str | None:
+def _work_country(ctx, q: str) -> str | None:
     """The country a work-authorization question is about: named in it, else the job's (India / remote from India)."""
     named = _countries_in(q)
     if named:
-        return named[0]
-    job_loc = (ctx.job.location if ctx.job else "") or ""
-    if "india" in authorized and (not job_loc or normalize_city(job_loc) or "india" in job_loc.lower()
-                                  or "remote" in job_loc.lower()):
-        return "india"
+        return named[0] if len(named) == 1 else None
+    location = ctx.job.location if ctx.job else ""
+    countries = _countries_in((location or "").lower())
+    if countries:
+        return countries[0] if len(countries) == 1 else None
+    city = normalize_city(location)
+    if city:
+        return {"singapore": "singapore", "dubai": "uae", "london": "united kingdom"}.get(city, "india")
     return None
 
 
@@ -838,7 +841,7 @@ def h_authorization(ctx, p, q):
     authorized = [_COUNTRY_ALIAS.get(c.lower(), c.lower()) for c in wp.authorized_countries]
     if not authorized:
         return _missing("work_preferences.authorized_countries")
-    country = _work_country(ctx, q, authorized)
+    country = _work_country(ctx, q)
     if country is None:
         return Answer(None, 0.0, "profile", needs_review=True, note="work authorization for this country unknown")
     ok = country in authorized

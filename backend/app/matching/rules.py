@@ -21,6 +21,7 @@ from app.matching.analyzer import (
 from app.matching.skills import canonicalize, skill_def
 from app.models import Decision
 from app.profile import Profile
+from app.resumes import resume_skills
 
 WEIGHTS = {"title": 0.25, "frontend_ratio": 0.20, "skills": 0.30, "experience": 0.12,
            "seniority": 0.08, "location": 0.05}
@@ -45,6 +46,7 @@ class MatchResult:
     analysis: dict[str, Any] = field(default_factory=dict)
     ai: dict[str, Any] | None = None
     resume_id: str | None = None
+    resume_comparison: list[dict] = field(default_factory=list)
     profile_rev: str = ""  # the preferences this decision was made with (see preferences_rev)
     ai_focus: bool = False  # frontend + AI (LLM / RAG / agents) role
     resume_category: str = "frontend"  # frontend | fullstack | ai: which resume flavour fits
@@ -78,6 +80,10 @@ def _excluded_title_keyword(profile: Profile, title: str) -> str | None:
             r"\b(?:front[ -]?end|ui|react|next\.?js) (?:engineer|developer)\b.*?\bmachine learning\b"
             r"(?![ -]+(?:engineer|developer|scientist))", title, re.I
         ):
+            continue
+        if keyword.casefold() == "marketing" and re.search(r"\bweb developer\s*\(marketing technology\)", title, re.I):
+            continue
+        if keyword.casefold() == "java developer" and re.search(r"\bfull[ -]?stack\b.*\breact\b", title, re.I):
             continue
         return keyword.strip()
     return None
@@ -242,13 +248,19 @@ def _score_skills(profile: Profile, job: JobInput, a: JobAnalysis, ctx: _Ctx,
     return max(0.0, min(100.0, score))
 
 
-def _score_experience(profile: Profile, a: JobAnalysis, ctx: _Ctx) -> float:
+def _score_experience(profile: Profile, job: JobInput, a: JobAnalysis, ctx: _Ctx) -> float:
     years = profile.professional.total_experience_years
     tol = profile.matching.experience_tolerance_years
     lo, hi = a.experience_min, a.experience_max
     if years is None:
         ctx.flags.append("Your total experience is not set in profile.json")
         return 60.0
+    cap = re.search(r"\b(?:maximum(?: of)?|no more than|at most)\s+(\d+(?:\.\d+)?)\s*(?:years?|yrs?)"
+                    r"(?:['’]?\s+(?:of\s+)?(?:(?:total|professional|work|overall) experience|experience(?=\s*(?:[.;,\n]|$))))",
+                    job.description + "\n" + job.experience_text, re.I)
+    if cap and years > float(cap[1]):
+        ctx.blockers.append(f"Explicit maximum of {cap[1]} years of experience; you have {years:g}")
+        return 0.0
     if lo is None and hi is None:
         ctx.reasons.append("Experience requirement not stated")
         return 70.0
@@ -269,8 +281,9 @@ def _score_experience(profile: Profile, a: JobAnalysis, ctx: _Ctx) -> float:
             if a.experience_conflict:  # "Senior ..." with "0-2 Yrs" in the portal's field: yours to judge, not a skip
                 ctx.flags.append(a.experience_note)
                 return 60.0
-            ctx.blockers.append(f"Role targets {req} years of experience; you have {years:g}")
-            return 10.0
+            if a.title_seniority == "junior":
+                ctx.blockers.append(f"Role targets {req} years of experience and has a junior title; you have {years:g}")
+                return 10.0
         ctx.reasons.append(f"Experience: requires {req} yrs, you have {years:g} (above range)")
         if over <= tol:
             return 85.0
@@ -330,6 +343,12 @@ def _score_location(profile: Profile, job: JobInput, a: JobAnalysis, ctx: _Ctx) 
     if "anywhere" in locs:
         ctx.reasons.append("Location: multiple / pan-India locations")
         return 85.0
+    if job.location and any(keyword_in(place, job.location) for place in prefs):
+        ctx.reasons.append(f"Location: {job.location} matches your preference")
+        return 100.0
+    if not locs and job.location and wp.willing_to_relocate:
+        ctx.reasons.append(f"Location: {job.location} (you are open to relocation)")
+        return 60.0
     if not locs:
         if profile.matching.location_strict and not wp.willing_to_relocate:
             ctx.flags.append(f"Location could not be verified against your preferences ({job.location or 'not stated'})")
@@ -348,6 +367,27 @@ def _score_location(profile: Profile, job: JobInput, a: JobAnalysis, ctx: _Ctx) 
 
 def evaluate_rules(profile: Profile, job: JobInput, analysis: JobAnalysis | None = None) -> MatchResult:
     a = analysis or analyze_job(job)
+    documented = set().union(*(resume_skills(r) for r in profile.resumes)) & set(a.skills)
+    additional = sorted(documented - set(_profile_skill_map(profile)))
+    if additional:
+        skills = profile.skills.model_copy(update={"secondary": [*profile.skills.secondary, *additional]})
+        profile = profile.model_copy(update={"skills": skills})
+    # A posting that accepts FastAPI / Flask / Django needs one of the three.
+    # Keep a separately stated mandatory requirement even if it also appears in an alternative.
+    backend_choices = r"\b(?:FastAPI|Flask|Django|Express|NestJS)\b"
+    alternatives = re.compile(backend_choices + r"(?:(?:\s*/\s*|\s+or\s+)" + backend_choices + r")+", re.I)
+    if alternatives.search(job.description):
+        from dataclasses import replace
+
+        others = alternatives.sub("", job.description)
+        independently_required = analyze_job(replace(job, description=others, skills=[])).required_skills
+        required = set(a.required_skills)
+        mine = set(_profile_skill_map(profile))
+        for group in alternatives.findall(job.description):
+            options = {canonicalize(s) for s in re.findall(backend_choices, group, re.I)}
+            if options & mine:
+                required -= options - mine - independently_required
+        a = replace(a, required_skills=required)
     ctx = _Ctx()
     matched: list[str] = []
     missing: list[str] = []
@@ -364,10 +404,12 @@ def evaluate_rules(profile: Profile, job: JobInput, analysis: JobAnalysis | None
         "title": _score_title(profile, job, a, ctx),
         "frontend_ratio": _score_ratio(profile, a, ctx),
         "skills": _score_skills(profile, job, a, ctx, matched, missing),
-        "experience": _score_experience(profile, a, ctx),
+        "experience": _score_experience(profile, job, a, ctx),
         "seniority": _score_seniority(profile, a, ctx),
         "location": _score_location(profile, job, a, ctx),
     }
+    if additional:
+        ctx.reasons.append(f"Additional skills listed in your resumes: {', '.join(additional)}")
     if prefs.min_salary_lpa and a.salary_max_lpa is not None and a.salary_max_lpa < prefs.min_salary_lpa:
         ctx.blockers.append(f"Salary up to {a.salary_max_lpa:g} LPA is below your minimum {prefs.min_salary_lpa:g} LPA")
     if a.jd_length < 150 and a.title_category != "frontend":
@@ -426,7 +468,25 @@ def evaluate_rules(profile: Profile, job: JobInput, analysis: JobAnalysis | None
         elif foreign_req:
             ctx.flags = [f"{f[:-1]}; not among your skills: {', '.join(foreign_req[:4])})"
                          if f.startswith("Full-stack role is backend-heavy") and f.endswith(")") else f for f in ctx.flags]
+    if (a.title_category == "fullstack" and not a.required_skills & _FRONTEND_CORE
+            and a.optional_skills & _FRONTEND_CORE and a.required_skills & _PLATFORMS
+            and re.search(r"cloud-based applications and pipelines|cloud migration", job.description, re.I)):
+        ctx.blockers.append("Cloud role: the required stack is backend and the posting lists web technologies as preferred")
+    if a.title_category == "fullstack" and prefs.accept_fullstack and not ctx.heavy_stack:
+        duty = r"\b(?:build|develop|implement|maintain|design)(?:ing)?\b[^.\n;]{0,70}"
+        frontend_duty = re.search(duty + r"\b(?:React|Angular|Next\.js|user interfaces?|front[ -]?end)\b", job.description, re.I)
+        backend_duty = re.search(duty + r"\b(?:APIs?|back[ -]?end|server[ -]side)\b", job.description, re.I)
+        req = set(a.required_skills)
+        if (frontend_duty and backend_duty and req & mine & _FRONTEND_CORE and req & mine & _PLATFORMS
+                and not (req & _PLATFORMS - mine)):
+            ctx.flags = [flag for flag in ctx.flags if not flag.startswith("Full-stack role is backend-heavy")]
+            ctx.blockers = [b for b in ctx.blockers if not b.startswith("Backend-heavy full-stack role: frontend focus")]
+            ctx.reasons.append("Description assigns both frontend and API development using your stack")
     if a.title_category in {"generic", "fullstack", "other"}:
+        framework_req = re.search(r"(?:proven|required|mandatory) experience with (?:ML/DL )?frameworks (?:like|such as) "
+                                  r"(PyTorch or TensorFlow)", job.description, re.I)
+        if framework_req and not any(canonicalize(s) in mine for s in ("PyTorch", "TensorFlow")):
+            ctx.flags.append(f"Posting explicitly asks for experience with {framework_req[1]}; neither is documented")
         model_work = re.search(r"\b(?:train(?:ing)?|fine[- ]tun(?:e|ing)|evaluat(?:e|ing))\s+(?:and\s+\w+\s+)?"
                                r"(?:machine learning |deep learning |language |ML |foundation )?models?\b",
                                job.description, re.I)
@@ -455,6 +515,9 @@ def evaluate_rules(profile: Profile, job: JobInput, analysis: JobAnalysis | None
                                 *(p.description for p in profile.projects)])
             if product.casefold() not in history.casefold():
                 ctx.flags.append(f"Check mandatory product experience against your work history: {product}")
+    if a.title_seniority == "manager" and re.search(r"\b(?:manage|lead and scale)\b[^.\n]{0,75}\bengineering teams?\b",
+                                                    job.description, re.I):
+        ctx.blockers.append("Management role: the description assigns leadership of engineering teams")
     _employment_and_kind(job, a, ctx)
     if ctx.heavy_stack:
         pct = round((ratio or 0) * 100)
@@ -576,7 +639,7 @@ def _preference(job: JobInput, a: JobAnalysis) -> tuple[float, str, bool]:
     """Your stated priorities on top of the fit score: React / Next.js first, frontend + AI welcome,
     Angular-only roles a little lower. Returns (score adjustment, note, frontend+AI flag)."""
     ai_mentions = sum(n for s, n in a.skills.items() if (d := skill_def(s)) and d.category == "ai")
-    frontendish = a.title_category == "frontend" or (a.frontend_ratio or 0) >= 0.5
+    frontendish = a.title_category in {"frontend", "fullstack"} or (a.frontend_ratio or 0) >= 0.5
     ai_in_title = bool(re.search(r"\bai\b|\bgen\s?ai\b|\bllm\b|\bml\b", job.title or "", re.I))
     ai_focus = frontendish and (ai_mentions >= 3 or (ai_in_title and ai_mentions >= 1))
     adjust, notes = 0.0, []
@@ -603,7 +666,7 @@ def preferences_rev(profile: Profile) -> str:
 
     wp = profile.work_preferences
     data = {
-        "matcher_version": 2,
+        "matcher_version": 3,
         "job": profile.job_preferences.model_dump(mode="json"),
         "matching": profile.matching.model_dump(mode="json"),
         "work": {"locations": sorted(p.strip().lower() for p in wp.preferred_locations), "remote": wp.open_to_remote,
@@ -630,6 +693,10 @@ def decision_reason(result: MatchResult, apply_threshold: float) -> str:
         return skip_reason(result, apply_threshold)
     if result.decision == Decision.SKIP.value:
         return f"Low match ({result.score}): " + ("; ".join(result.reasons[:2]) or "little of the role fits your profile")
+    if result.decision == Decision.MANUAL_REVIEW.value and not result.flags:
+        components = sorted((k for k in WEIGHTS if k in result.breakdown), key=result.breakdown.get)
+        weakest = ", ".join(f"{k.replace('_', ' ')} {result.breakdown[k]:g}/100" for k in components[:2])
+        return f"Match score {result.score:g} (automatic threshold {apply_threshold:g}); {weakest}"
     return "; ".join(result.flags) or (result.reasons[0] if result.reasons else "")
 
 

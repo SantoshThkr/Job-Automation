@@ -117,8 +117,12 @@ class InstahyreAdapter(PortalAdapter):
     # ------------------------------------------------------------ search
     def search_url(self, q: SearchQuery) -> str:
         # The portal's own frontend-function checkbox and city Search action generate these parameters.
-        params: dict[str, str | int] = {"skills": q.keywords, "job_functions": "/api/v1/job_function/3",
-                                        "search": "true"}
+        params: dict[str, str | int] = {"skills": q.keywords, "search": "true"}
+        if re.search(r"\b(?:full[ -]?stack|mern)\b", q.keywords, re.I):
+            params["skills"] = ("MERN" if "mern" in q.keywords.lower() else "Generative AI"
+                                if re.search(r"\bai\b", q.keywords, re.I) else "React")
+        else:
+            params["job_functions"] = "/api/v1/job_function/3"
         if q.location:
             params["location"] = {"bengaluru": "Bangalore", "remote": "Work From Home"}.get(
                 q.location.casefold(), q.location)
