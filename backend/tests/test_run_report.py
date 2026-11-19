@@ -95,3 +95,23 @@ def test_the_endpoint(clean_db):
         assert c.get(f"/api/agent/runs/{rid}/breakdown?audit=true").json()["audit"]["skips_checked"] == 3
         assert c.get("/api/agent/runs/999999/breakdown").status_code == 404
         assert c.get("/api/agent/runs/0/breakdown").status_code == 422
+
+
+def test_portal_conversion_uses_the_discovery_cohort(clean_db):
+    from app.engine.run_report import run_breakdown
+
+    with session_scope() as db:
+        run = Run(mode="auto", portals=["linkedin"], stats={"portal.linkedin.sightings": 4})
+        db.add(run)
+        db.flush()
+        linked = _job(db, "found", "React Engineer", JobStatus.APPLIED, "Confirmed")
+        uncertain = _job(db, "two", "UI Engineer", JobStatus.REVIEW_PENDING, "Unknown posting date")
+        backlog = _job(db, "backlog", "Frontend Developer", JobStatus.APPLIED, "Confirmed")
+        for job, age in [(linked, "in"), (uncertain, "unknown")]:
+            add_event(db, job.id, "listing_seen", job.status_reason, run_id=run.id,
+                      data={"age": age, "domain": "relevant", "status": job.status})
+        for job in [linked, backlog]:
+            add_event(db, job.id, "result_applied", "Application received", run_id=run.id)
+        metrics = run_breakdown(db, run.id)["portal_metrics"]["linkedin"]["metrics"]
+        assert metrics["Confirmed"] == 2 and metrics["Relevant conversion (%)"] == 50
+        assert metrics["Repeat sightings"] == 2 and metrics["Fresh and relevant (%)"] == 50

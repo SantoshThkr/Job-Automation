@@ -141,13 +141,15 @@ def job_action(job_id: JobId, body: JobAction, db: Session = Depends(get_db)) ->
     if action == "approve":
         if job.status in {JobStatus.APPLIED, JobStatus.ALREADY_APPLIED}:
             raise HTTPException(409, "Already applied")
+        if app and (app.confirmed or app.submit_attempted):
+            raise HTTPException(409, "Check the earlier submission before approving another attempt")
         set_status(db, job, JobStatus.QUEUED, "Approved by you - will apply on the next run")
         add_event(db, job.id, "user_approved", "You approved this job for application")
     elif action == "skip":
         set_status(db, job, JobStatus.SKIPPED, body.note or "Skipped by you")
         add_event(db, job.id, "user_skipped", "You skipped this job")
     elif action == "retry":
-        if job.status in {JobStatus.APPLIED, JobStatus.ALREADY_APPLIED}:
+        if job.status in {JobStatus.APPLIED, JobStatus.ALREADY_APPLIED} or (app and app.confirmed):
             raise HTTPException(409, "Already applied")
         if app is not None and app.submit_attempted and not app.confirmed and not body.force:
             raise HTTPException(409, "A submit was already attempted for this job - check the portal first, "

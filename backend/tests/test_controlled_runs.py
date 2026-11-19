@@ -310,3 +310,29 @@ def test_who_answers_recognises_this_api_by_its_name_only(monkeypatch):
     assert cli.who_answers(8000) == "other"
     answers["body"] = ConnectionRefusedError()
     assert cli.who_answers(8000) == "none"
+
+
+async def test_confirmation_target_is_independent_of_attempts_and_other_portals(orch, profile, monkeypatch):
+    orch.profile = profile
+    orch.portal_stats["naukri"]["confirmed"] = 9
+    ids = _queue(3)
+    with session_scope() as db:
+        other, _ = upsert_job(db, _posting("other", portal="linkedin"))
+        set_status(db, other, JobStatus.QUEUED)
+        other_id = other.id
+    attempted = []
+
+    async def apply(job_id, adapter, posting):
+        attempted.append(job_id)
+        with session_scope() as db:
+            job = db.get(Job, job_id)
+            app = start_application(db, job, AgentMode.AUTO, resume_id=None, resume_path=None)
+            app_id = app.id
+        result = ApplyResult(ApplyOutcome.APPLIED, confirmation_text="" if job_id == ids[0] else "Application received")
+        orch._finalize(job_id, app_id, result)
+        return result
+
+    monkeypatch.setattr(orch, "apply_job", apply)
+    await orch.process_queue(["naukri", "linkedin"])
+    assert attempted == [ids[0], ids[1], other_id]
+    assert orch.portal_stats["naukri"]["confirmed"] == 10 and orch.portal_stats["linkedin"]["confirmed"] == 1

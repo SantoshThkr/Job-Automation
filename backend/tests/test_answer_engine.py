@@ -72,7 +72,15 @@ async def test_direct_facts(engine, question, field_type, expected):
 
 # ------------------------------------------------------------------ 2. derived facts
 
-async def test_notice_period_and_joining(engine):
+async def test_notice_period_and_joining(engine, monkeypatch):
+    from datetime import date
+
+    class DuringNotice(date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 11, 1)
+
+    monkeypatch.setattr("app.answers.question_bank.date", DuringNotice)
     a = await engine.answer(q("What is your notice period?", "select", ["Immediate", "15 days", "1 month", "2 months"]))
     assert a.value == "1 month"
     a = await engine.answer(q("How soon can you join?"))

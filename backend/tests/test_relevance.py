@@ -399,3 +399,36 @@ def test_an_employers_name_no_longer_decides_what_the_role_is(profile):
     assert title_prescreen(profile, "Fractal Analytics - Senior Full - Stack Engineer")  # the old title: skipped
     company, role = split_company_title("Fractal Analytics - Senior Full - Stack Engineer")
     assert company == "Fractal Analytics" and title_prescreen(profile, role) == []
+
+
+def test_optional_ai_and_backend_skills_do_not_change_frontend_resume(profile):
+    baseline = rules(profile, "Senior Frontend Developer", FRONTEND_JD)
+    result = rules(profile, "Senior Frontend Developer", FRONTEND_JD +
+                   "\nOptional: Python, Kubernetes, DevOps, AI, LLMs, RAG and machine learning",
+                   skills=["React", "Python", "Kubernetes"])
+    assert result.decision == "APPLY" and result.resume_id == baseline.resume_id == "frontend"
+    assert result.frontend_ratio == baseline.frontend_ratio and not result.ai_focus
+
+
+def test_backend_duties_and_unverified_mandatory_domain_experience_require_review(profile):
+    description = (FRONTEND_JD + "\nKey responsibilities\nBuild React interfaces.\nBuild backend services.\n"
+                   "Manage cloud infrastructure.\nMaintain databases.\nRequired skills\nReact and TypeScript.\n"
+                   "Candidate must have hands-on experience building travel websites, including hotel bookings.")
+    match = rules(profile, "Full Stack Engineer", description)
+    assert match.decision == "MANUAL_REVIEW"
+    assert any("backend or infrastructure duties" in f for f in match.flags)
+    assert any("travel websites" in f for f in match.flags)
+
+
+def test_incidental_react_mention_does_not_qualify_model_training_role(profile):
+    result = rules(profile, "AI Engineer", "Train machine learning models. Evaluate models with PyTorch, "
+                   "transformers, LLMs and RAG. The reporting dashboard uses React.")
+    assert result.decision != "APPLY"
+
+
+def test_frontend_machine_learning_product_title_is_read(profile):
+    p = profile.model_copy(deep=True)
+    p.job_preferences.excluded_title_keywords.append("machine learning")
+    title = "Senior Frontend Engineer - Machine Learning Products"
+    assert not title_prescreen(p, title) and rules(p, title).decision == "APPLY"
+    assert title_prescreen(p, "Senior Machine Learning Engineer")

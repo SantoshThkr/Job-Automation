@@ -155,7 +155,7 @@ def release_recency(profile: Profile, window: Window, *, run_id: int | None = No
             if state == "out":
                 count("unchanged")
                 continue
-            if not (job.description or "").strip():
+            if details.get("unread_card") or not (job.description or "").strip():
                 proposed, why = JobStatus.NEW, "It is read again when a search shows it (your recency window changed)"
             else:
                 result = matcher.evaluate_rules_only(JobInput(

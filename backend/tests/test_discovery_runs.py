@@ -103,3 +103,28 @@ async def test_sightings_reconcile_with_outcomes(clean_db, profile):
                                   "review_pending", "relevant", "job_errors"))
     assert s["discovered"] == outcomes
     assert s["new_jobs"] == s["unique_listings"] == 3
+
+
+async def test_old_card_never_opens_detail_page(clean_db, profile):
+    from app.matching.posting import Window
+    from app.models import Job
+    from sqlalchemy import select
+
+    portal = _SamePortal()
+    orch = _orch(portal, profile)
+    orch.window = Window(days=1)
+    old = JobPosting("instahyre", "old", "https://example.test/old", "React Developer", posted_text="3+ weeks ago")
+    await orch.handle_posting(portal, old)
+    with session_scope() as db:
+        job = db.scalar(select(Job).where(Job.external_id == "old"))
+        assert job.status == "SKIPPED" and job.match_details["unread_card"]
+    assert orch.stats["too_old"] == 1
+
+
+def test_queries_are_compiled_for_each_portal():
+    from app.portals.queries import frontend_queries
+
+    configured = ["React Developer", "react developer", "React Native", "AI Engineer", "DevOps", "Next.js Engineer"]
+    assert frontend_queries("linkedin", configured) == ["React Developer", "Next.js Engineer"]
+    assert frontend_queries("instahyre", configured) == ["React", "Next.js"]
+    assert frontend_queries("naukri", configured) == ["React Developer", "Next.js Engineer"]

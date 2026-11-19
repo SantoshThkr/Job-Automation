@@ -165,3 +165,21 @@ def test_the_recorded_confirmation_is_the_line_that_says_it_was_sent():
     assert confirmation_line("Next best action\nYour application was sent to Kitco\nDone") == "Your application was sent to Kitco"
     assert confirmation_line("", seen="Applied 2 seconds ago") == "Applied 2 seconds ago"
     assert confirmation_line(panel) == "Next best action" and confirmation_line("") == "LinkedIn"  # nothing better known
+
+
+async def test_component_search_card(linkedin, engine, monkeypatch):
+    from app.portals.base import SearchQuery
+
+    async def show_search(*args, **kwargs):
+        await engine.page.set_content("""
+          <main><div role="button" componentkey="job-card-component-ref-98765">
+          <p><span>Selected, Senior React Engineer</span><span aria-hidden="true">Senior React Engineer</span></p>
+          <p>Acme</p><p>Noida</p><p>Posted 6 hours ago</p><p>Easy Apply</p></div></main>""")
+
+    monkeypatch.setattr(engine, "goto", show_search)
+    cards = [c async for c in linkedin.search(SearchQuery("React Engineer", max_pages=1))]
+    assert len(cards) == 1
+    job = cards[0]
+    assert (job.external_id, job.title, job.company, job.posted_text) == (
+        "98765", "Senior React Engineer", "Acme", "Posted 6 hours ago")
+    assert job.easy_apply and not job.already_applied

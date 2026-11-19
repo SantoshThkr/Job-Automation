@@ -25,6 +25,7 @@ class SearchQuery:
     max_jobs: int = 50
     easy_apply_only: bool = False
     extra: dict = field(default_factory=dict)
+    repeat_sightings: int = 0  # cards the adapter already emitted during this query
 
 
 class PortalAdapter(ABC):

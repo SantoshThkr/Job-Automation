@@ -1,4 +1,4 @@
-"""Instahyre adapter: matched opportunities + skill search, job details, apply (one-click or modal).
+"""Instahyre adapter: frontend skill and location search, job details, apply (one-click or modal).
 
 All Instahyre-specific selectors live here. Instahyre's "Apply"/"Interested" button may submit
 immediately, so the submit gate (dry run / review / auto) runs *before* that first click; an
@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator
 from urllib.parse import urlencode, urljoin
 
 from playwright.async_api import Error as PlaywrightError, Page
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.browser.errors import LoginRequired
 from app.browser.forms import collect_errors, summarize_unresolved
@@ -34,6 +35,7 @@ LOGGED_OUT = T("instahyre logged out", css=["form#login-form", "input#email[type
 CARD_SELECTORS = ["div.employer-block", "div.opportunity-card", "[ng-repeat*='opportunit']", "div.job-card",
                   "li.opportunity"]
 CARD_FIELDS = {
+    "posted": ["time", ".posted-date", ".job-posted-date"],
     "title": [".employer-job-name", ".job-title", ".opportunity-title", "h3", "h4"],
     "company": [".company-name", ".employer-name", "h2", ".company"],
     "location": [".employer-locations", ".job-locations", ".location", "[class*='location']"],
@@ -44,7 +46,6 @@ CARD_MULTI = {"skills": [".skill", ".job-skill", ".tag", "[class*='skill'] li"]}
 CARD_ATTRS = {"href": (["a[href*='/job-']", "a.job-link", "a[href*='job']"], "href"),
               "job_id": ([":self", "[data-job-id]"], "data-job-id")}
 CARD_FLAGS = {"applied": [".applied", "[class*='applied']", "button[disabled].apply-btn"]}
-LOAD_MORE = T("load more", css=["button.load-more", "#load-more"], text=["Load more", "Show more", "View more"])
 
 DETAIL_TITLE = ["h1.job-title", ".job-title h1", "h1"]
 DETAIL_COMPANY = [".company-name", "h2.company", ".employer-name", "h2"]
@@ -95,10 +96,6 @@ class InstahyreAdapter(PortalAdapter):
     name = "instahyre"
     display_name = "Instahyre"
 
-    def __init__(self, engine, base_url: str) -> None:
-        super().__init__(engine, base_url)
-        self._opportunities_done = False
-
     @property
     def login_url(self) -> str:
         return f"{self.base_url}/login/"
@@ -119,44 +116,55 @@ class InstahyreAdapter(PortalAdapter):
 
     # ------------------------------------------------------------ search
     def search_url(self, q: SearchQuery) -> str:
-        params: dict[str, str | int] = {"skills": q.keywords}
+        # The portal's own frontend-function checkbox and city Search action generate these parameters.
+        params: dict[str, str | int] = {"skills": q.keywords, "job_functions": "/api/v1/job_function/3",
+                                        "search": "true"}
         if q.location:
-            params["locations"] = q.location
+            params["location"] = {"bengaluru": "Bangalore", "remote": "Work From Home"}.get(
+                q.location.casefold(), q.location)
         if q.experience_years is not None:
             params["years"] = int(q.experience_years)
         return f"{self.base_url}/search-jobs/?{urlencode(params)}"
 
     async def search(self, query: SearchQuery) -> AsyncIterator[JobPosting]:  # type: ignore[override]
-        urls = []
-        if not self._opportunities_done:
-            urls.append(f"{self.base_url}/candidate/opportunities/?matching=true")  # Instahyre's matched jobs
-            self._opportunities_done = True
-        urls.append(self.search_url(query))
-        seen: set[str] = set()
-        yielded = 0
-        for url in urls:
-            await self.engine.goto(url)
-            self._check_session()
+        # The numbered control changes the results in place without changing the URL. Collect the
+        # bounded search batch first, since the consumer navigates to each job as soon as it is yielded.
+        jobs: dict[str, JobPosting] = {}
+        await self.engine.goto(self.search_url(query))
+        self._check_session()
+        for page_no in range(1, max(1, query.max_pages) + 1):
             key, _ = await self.engine.wait_for_any({"cards": T(css=CARD_SELECTORS)}, timeout_ms=12_000)
             if key is None:
-                continue
-            for _ in range(max(0, query.max_pages - 1)):
-                more = await self.engine.find(LOAD_MORE, timeout_ms=800)
-                if more is None:
-                    break
-                await self.engine.click(more)
-                await self.engine.page.wait_for_timeout(800)
+                break
             await self.engine.scroll_to_load_all(T(css=CARD_SELECTORS), max_rounds=4)
             cards = await extract_cards(self.engine.page, CARD_SELECTORS, CARD_FIELDS, CARD_MULTI, CARD_ATTRS, CARD_FLAGS)
             for c in cards:
                 job = self._card_to_job(c)
-                if job is None or job.external_id in seen:
+                if job is None:
                     continue
-                seen.add(job.external_id)
-                yielded += 1
-                yield job
-                if yielded >= query.max_jobs:
-                    return
+                if job.external_id in jobs:
+                    query.repeat_sightings += 1
+                    continue
+                jobs[job.external_id] = job
+                if len(jobs) >= query.max_jobs:
+                    break
+            if len(jobs) >= query.max_jobs or page_no >= query.max_pages:
+                break
+            pager = self.engine.page.locator('li[ng-click*="nthPage"]').filter(has_text=re.compile(rf"^\s*{page_no + 1}\s*$"))
+            if not await pager.count():
+                break
+            heading = self.engine.page.locator("h2").first
+            before = await heading.inner_text()
+            await self.engine.click(pager.first)
+            try:
+                await self.engine.page.wait_for_function(
+                    "old => { const h = document.querySelector('h2'); return h && h.innerText !== old }",
+                    arg=before, timeout=6000)
+            except PlaywrightTimeoutError:
+                log.warning("Instahyre did not advance to results page %d", page_no + 1)
+                break
+        for job in jobs.values():
+            yield job
 
     def _card_to_job(self, c: dict) -> JobPosting | None:
         href = c.get("href") or ""
@@ -167,7 +175,7 @@ class InstahyreAdapter(PortalAdapter):
         location, years = split_location(c.get("location", ""))
         company, title = split_company_title(c["title"], c.get("company", ""))
         return JobPosting(portal=self.name, external_id=str(job_id), url=url or f"{self.base_url}/job-{job_id}-job/",
-                          title=title, company=company, location=location,
+                          title=title, company=company, location=location, posted_text=c.get("posted", ""),
                           experience_text=c.get("experience", "") or years, snippet=c.get("snippet", ""),
                           skills=c.get("skills") or [], already_applied=bool(c.get("applied")))
 
@@ -276,6 +284,7 @@ class InstahyreAdapter(PortalAdapter):
         if confirm is None:
             return ApplyResult(ApplyOutcome.MANUAL_ACTION_REQUIRED, "Could not find the confirm button",
                                submit_attempted=True)
+        await ctx.mark_submit_attempt()
         await self.engine.click(confirm)
         await page.wait_for_timeout(500)
         errors = await collect_errors(modal) if await modal.is_visible() else []

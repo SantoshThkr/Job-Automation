@@ -95,3 +95,29 @@ async def test_already_applied(ih, engine, profile):
     job = await _job(ih, "5003")
     res = await ih.apply(job, make_ctx(engine, profile, job, AgentMode.AUTO))
     assert res.outcome == ApplyOutcome.ALREADY_APPLIED
+
+
+def test_search_uses_instahyre_frontend_function_and_singular_location(ih):
+    from urllib.parse import parse_qs, urlsplit
+
+    params = parse_qs(urlsplit(ih.search_url(SearchQuery("Next.js", "Bengaluru"))).query)
+    assert params["job_functions"] == ["/api/v1/job_function/3"]
+    assert params["location"] == ["Bangalore"]
+    assert params["skills"] == ["Next.js"]
+
+
+async def test_numbered_results_are_collected_before_details_replace_the_page(ih, engine, monkeypatch):
+    async def load_results(url):
+        await engine.page.set_content("""
+          <h2>Showing 1 - 1 out of 2 React jobs</h2>
+          <div class="job-card" data-job-id="10"><h3>Frontend Developer</h3></div>
+          <ul><li ng-click="nthPage(pageNumber)" onclick="
+            document.querySelector('h2').textContent='Showing 2 - 2 out of 2 React jobs';
+            document.querySelector('.job-card').dataset.jobId='20'">2</li></ul>""")
+
+    monkeypatch.setattr(engine, "goto", load_results)
+    found = []
+    async for posting in ih.search(SearchQuery("React", "Noida", max_pages=2)):
+        found.append(posting.external_id)
+        await engine.page.set_content("<h1>Job details</h1>")
+    assert found == ["10", "20"]

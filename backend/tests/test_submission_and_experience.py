@@ -505,3 +505,11 @@ async def test_a_script_refusal_in_an_error_label_is_fixed_and_resubmitted(engin
     res = await apply_external(engine, engine.page, ctx)
     assert res.outcome == ApplyOutcome.APPLIED and "Applied successfully!" in res.confirmation_text, (res.message, res.evidence)
     assert await engine.page.evaluate("() => window.SUBMITS") == 1
+
+
+def test_success_flag_and_disappearing_controls_do_not_confirm_an_application():
+    from app.engine.submission import NetworkHit
+
+    after = PageState(url="https://co.test/home", fields=[])
+    hit = NetworkHit("POST", "https://co.test/apply", 200, success=True)
+    assert decide(BEFORE, after, network=[hit], final=True).state != SubmissionState.CONFIRMED

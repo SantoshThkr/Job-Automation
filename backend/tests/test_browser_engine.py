@@ -227,3 +227,17 @@ async def test_collect_errors(engine, site_server):
     await engine.page.evaluate("""() => { const d = document.createElement('div'); d.className = 'error-message';
         d.textContent = 'This field is required'; document.body.appendChild(d); }""")
     assert "This field is required" in await collect_errors(engine.page)
+
+
+async def test_required_aria_checkbox_is_read_back(engine, profile):
+    await engine.page.set_content("""
+        <button role="checkbox" aria-checked="false" aria-required="true" aria-label="Willing to relocate"
+          onclick="this.setAttribute('aria-checked', this.getAttribute('aria-checked') === 'false')">Relocate</button>""")
+    field, = await scan_fields(engine.page)
+    filler = FormFiller(engine, Answerer(profile), resume_path=None, job=None)
+    box = engine.page.locator(field.selector)
+    assert field.required and field.is_empty and field.type == "checkbox"
+    assert await filler.set_value(box, field, "Yes")
+    assert (await filler.verify(box, field, "Yes"))[0]
+    assert await filler.set_value(box, field, "No")
+    assert not (await filler.verify(box, field, "No"))[0]

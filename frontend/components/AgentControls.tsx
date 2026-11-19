@@ -24,6 +24,7 @@ export function AgentControls({ agent, onChange, defaultPortals }: {
   agent: AgentState | null;
   onChange: () => void;
   defaultPortals: Portal[];
+  
 }) {
   const { busy, error, run } = useAction();
   const [mode, setMode] = useState<Mode>("dry_run");

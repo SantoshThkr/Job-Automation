@@ -46,7 +46,7 @@ _SCAN_JS = r"""
   addRoot(base);
   if (base !== doc && base.shadowRoot) addRoot(base.shadowRoot);
   const all = [];
-  for (const r of roots) r.querySelectorAll('input, textarea, select, [contenteditable="true"], [role="combobox"]:not(input), button[aria-haspopup="listbox"]').forEach(e => all.push(e));
+  for (const r of roots) r.querySelectorAll('input, textarea, select, [contenteditable="true"], [role="combobox"]:not(input), [role="checkbox"][aria-checked], button[aria-haspopup="listbox"]').forEach(e => all.push(e));
 
   const byId = (el, id) => { const rn = el.getRootNode(); return (rn.getElementById ? rn.getElementById(id) : null) || doc.getElementById(id); };
   const labelEl = (el) => {
@@ -131,6 +131,9 @@ _SCAN_JS = r"""
     const tn = el.tagName.toLowerCase();
     let type = tn === 'input' ? (el.getAttribute('type') || 'text').toLowerCase() : tn;
     if (tn === 'button' && el.getAttribute('aria-haspopup') === 'listbox') type = 'listbox_button';
+    const ariaBox = tn !== 'input' && el.matches('[role="checkbox"][aria-checked]');
+    if (ariaBox && (el.querySelector('input[type=checkbox]') || el.closest('[aria-disabled=true]'))) continue;
+    if (ariaBox) type = 'checkbox';
     if (['hidden', 'submit', 'button', 'image', 'reset'].includes(type)) continue;
     if (el.disabled) continue;
     if (el.getAttribute('contenteditable') === 'true') type = 'contenteditable';
@@ -181,7 +184,7 @@ _SCAN_JS = r"""
         continue;
       }
     }
-    let label = ownLabel(el);
+    let label = ownLabel(el) || (ariaBox ? T(el) : '');
     // the search box of a dropdown widget: the widget is the control (its entries and its shown value are not labels)
     const widget = type === 'combobox' && tn === 'input' ? el.closest('.ui.dropdown, .select2-container, .chosen-container') : null;
     const native = widget ? widget.querySelector('select') : null;
@@ -218,7 +221,7 @@ _SCAN_JS = r"""
                     first.value !== '' && !/^\s*(select|choose|--|please|none\s+selected)/i.test(first.text || '');
       f.value = !f.defaulted && sel && sel.value !== '' && el.selectedIndex >= 0 && !/^\s*(select|choose|--|please)/i.test(sel.text) ? sel.text.trim() : '';
     } else if (type === 'checkbox') {
-      f.value = el.checked ? 'true' : '';
+      f.value = (ariaBox ? el.getAttribute('aria-checked') === 'true' : el.checked) ? 'true' : '';
     } else if (type === 'contenteditable') {
       f.value = T(el);
     } else if (type === 'combobox' && tn === 'input' && el.closest('.ui.dropdown, .select2-container, .chosen-container')) {
@@ -383,6 +386,7 @@ _VERIFY_JS = r"""
   let got = '';
   if (el.tagName === 'SELECT') got = el.selectedIndex >= 0 ? (el.options[el.selectedIndex].text || '') : '';
   else if (el.isContentEditable) got = el.innerText || '';
+  else if (el.matches('[role="checkbox"][aria-checked]')) got = el.getAttribute('aria-checked') === 'true' ? '__checked__' : '';
   else if (el.type === 'checkbox' || el.type === 'radio') got = el.checked ? '__checked__' : '';
   else if (el.tagName === 'BUTTON' || !('value' in el)) got = el.innerText || el.textContent || '';
   else got = el.value || '';
@@ -632,7 +636,8 @@ class FormFiller:
         ans.verified = verified if ok else False
         if not ok:
             return FilledField(f, question, ans, "failed", f"could not set value '{ans.value[:60]}'", verified=False)
-        if not verified and problem:
+        if not verified and (problem or f.required):
+            problem = problem or "could not verify the required value after filling"
             return FilledField(f, question, ans, "failed", f"the form did not accept '{ans.value[:60]}': {problem}",
                                verified=False)
         status = "unresolved" if ans.needs_review else "filled"
@@ -799,6 +804,8 @@ class FormFiller:
             return False, str(exc).splitlines()[0][:120]
         if f.type == "checkbox":
             want = value.strip().lower() in {"yes", "true", "y", "1", "i agree", "agree", "checked"}
+            if f.required and not want:
+                return False, "the form requires this box to be checked"
             ok = (state["got"] == "__checked__") == want
         elif f.type in {"date", "month", "datetime-local", "time", "week", "combobox"}:
             ok = bool(state["got"])  # the widget reformats dates / shows its own label
@@ -965,6 +972,10 @@ class FormFiller:
                 return bool(f.name) and await _radio_selected(base, f.name, opt.label) is True
             if f.type == "checkbox":
                 want = value.strip().lower() in {"yes", "true", "y", "1", "i agree", "agree", "checked"}
+                if await loc.get_attribute("role") == "checkbox" and await loc.get_attribute("aria-checked") is not None:
+                    if (await loc.get_attribute("aria-checked") == "true") != want:
+                        await loc.click()
+                    return await loc.get_attribute("aria-checked") == str(want).lower()
                 is_checked = await loc.is_checked()
                 if want != is_checked:
                     return await _check(base, f.id, uncheck=not want)

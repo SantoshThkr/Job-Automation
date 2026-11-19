@@ -15,7 +15,7 @@ from urllib.parse import urlencode
 
 from playwright.async_api import Error as PlaywrightError, Locator, Page
 
-from app.browser.errors import LoginRequired
+from app.browser.errors import LoginRequired, NavigationFailed
 from app.browser.forms import FormFiller, collect_errors, summarize_unresolved
 from app.browser.selectors import T
 from app.engine.context import ApplyContext, GateResult, SubmitDecision
@@ -30,9 +30,11 @@ log = logging.getLogger(__name__)
 
 # Sign-in state is decided from several signals in portals/linkedin_session.py (cookie, URL, page, all tabs).
 
-CARD_SELECTORS = ["li[data-occludable-job-id]", "div.job-card-container[data-job-id]", "li.jobs-search-results__list-item",
+COMPONENT_CARD = '[role="button"][componentkey^="job-card-component-ref-"]'
+CARD_SELECTORS = [COMPONENT_CARD, "li[data-occludable-job-id]", "div.job-card-container[data-job-id]", "li.jobs-search-results__list-item",
                   "li.scaffold-layout__list-item", "div[data-job-id]"]
 CARD_FIELDS = {
+    "posted": ["time", ".posted-date", ".job-posted-date"],
     "title": ["a.job-card-list__title--link strong", "a.job-card-list__title", ".job-card-list__title--link",
               ".artdeco-entity-lockup__title", "a.job-card-container__link"],
     "company": [".artdeco-entity-lockup__subtitle", ".job-card-container__primary-description",
@@ -231,17 +233,36 @@ class LinkedInAdapter(PortalAdapter):
                 {"cards": T(css=CARD_SELECTORS), "none": T(css=[".jobs-search-no-results-banner",
                                                                 ".jobs-search-two-pane__no-results-banner--expand"],
                                                            within_text=["No matching jobs found"])}, timeout_ms=15_000)
-            if key != "cards":
+            if key == "none":
                 break
+            if key != "cards":
+                raise NavigationFailed("LinkedIn showed neither recognizable job cards nor an empty-results message")
             container = await self.engine.page.evaluate(
                 "(sels) => { for (const s of sels.split(',')) { if (document.querySelector(s.trim())) return s.trim(); } return null; }",
                 LIST_CONTAINER)
             await self.engine.scroll_to_load_all(T(css=CARD_SELECTORS), max_rounds=6, container_selector=container)
-            cards = await extract_cards(self.engine.page, CARD_SELECTORS, CARD_FIELDS, attrs=CARD_ATTRS)
+            components = self.engine.page.locator(COMPONENT_CARD)
+            if await components.count():
+                cards = await components.evaluate_all(r"""cards => cards.map(card => {
+                    const lines = Array.from(card.querySelectorAll('p'));
+                    const text = p => (p?.innerText || '').trim();
+                    const footer = lines.slice(3).map(text);
+                    return {
+                        job_id: card.getAttribute('componentkey').match(/^job-card-component-ref-(\d+)$/)?.[1],
+                        title: text(lines[0]?.querySelector('[aria-hidden=true]')) || text(lines[0]).split('\n').pop(),
+                        company: text(lines[1]), location: text(lines[2]), footer: footer.join(' '),
+                        posted: footer.find(s => /^(?:posted |reposted )?\d+\+? (?:minutes?|hours?|days?|weeks?|months?) ago/i.test(s)) || ''
+                    };
+                })""")
+            else:
+                cards = await extract_cards(self.engine.page, CARD_SELECTORS, CARD_FIELDS, attrs=CARD_ATTRS)
             new = 0
             for c in cards:
                 job = self._card_to_job(c)
-                if job is None or job.external_id in seen:
+                if job is None:
+                    continue
+                if job.external_id in seen:
+                    query.repeat_sightings += 1
                     continue
                 seen.add(job.external_id)
                 new += 1
@@ -260,7 +281,7 @@ class LinkedInAdapter(PortalAdapter):
         footer = (c.get("footer") or "") + " " + (c.get("_text") or "")
         return JobPosting(portal=self.name, external_id=str(job_id), url=f"{self.base_url}/jobs/view/{job_id}/",
                           title=re.sub(r"\s+with verification$", "", title), company=c.get("company", ""),
-                          location=c.get("location", ""), easy_apply="Easy Apply" in footer,
+                          posted_text=c.get("posted", ""), location=c.get("location", ""), easy_apply="Easy Apply" in footer,
                           already_applied=bool(re.search(r"\bApplied\b", c.get("footer") or "")))
 
     # ----------------------------------------------------------- details

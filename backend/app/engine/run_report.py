@@ -33,8 +33,8 @@ def _discovery_outcome(ev: ApplicationEvent) -> tuple[str, str, str] | None:
         if decision == "SKIP":
             return ("skipped_title" if kind == "title" else "skipped"), why, ("title" if kind == "title" else "read")
         return ("review" if decision == "MANUAL_REVIEW" else "relevant"), why, "read"
-    if ev.type == "recency" and not msg.startswith("Not applied"):
-        return "too_old", msg, "posting date"
+    if ev.type == "recency" and not msg.startswith(("Not applied", "Not submitting")):
+        return "too_old", msg, (ev.data or {}).get("stage", "posting date")
     if ev.type == "expired":
         return "closed", msg, "read"
     if ev.type == "duplicate":
@@ -123,6 +123,47 @@ def run_breakdown(db: Session, run_id: int, *, audit: bool = False, profile: Any
                            + ", ".join(f"{by_outcome[k]} {k.replace('_', ' ')}" for k in OUTCOMES if by_outcome[k])
                            + f"){' + ' + str(stats.get('already_applied')) + ' already applied' if stats.get('already_applied') else ''}"),
     }
+    if any(key.startswith("portal.") for key in stats) or any(e.type == "listing_seen" for e in events):
+        out["portal_metrics"] = {}
+        for portal in run.portals or []:
+            portal_events = [e for e in events if jobs.get(e.job_id) and jobs[e.job_id].portal == portal]
+            observed = {e.job_id: e.data for e in portal_events if e.type == "listing_seen"}
+            details = [{"id": e.job_id, "title": jobs[e.job_id].title, "status": (e.data or {}).get("status"),
+                        "reason": e.message} for e in portal_events if e.type == "listing_seen"]
+            relevant = {j for j, d in observed.items() if d.get("domain") == "relevant"}
+            fresh = {j for j, d in observed.items() if d.get("age") == "in"}
+            confirmed = {e.job_id for e in portal_events if e.type == "result_applied" and
+                         not (e.message or "").startswith("Verified:")}
+            failures = [{"id": e.job_id, "reason": e.message} for e in portal_events if e.type == "result_failed"]
+            unique = stats.get(f"portal.{portal}.unique", len(observed))
+            sightings = stats.get(f"portal.{portal}.sightings", unique)
+            metrics = {
+                "Sightings": sightings, "Unique listings": unique, "Repeat sightings": sightings - unique,
+                "Listing evaluation incomplete": unique - len(observed),
+                "Fresh": len(fresh), "Old at search": sum(e.type == "recency" and (e.data or {}).get("stage") == "search"
+                                                         for e in portal_events),
+                "Old after opening": sum(outcome == "too_old" and stage != "search"
+                                        for j, (outcome, _, stage) in decided.items() if jobs[j].portal == portal),
+                "Closed": by_portal[portal]["closed"], "Duplicate listings": by_portal[portal]["duplicate"],
+                "Relevant": len(relevant), "Irrelevant": sum(d.get("domain") == "irrelevant" for d in observed.values()),
+                "Domain uncertain": sum(d.get("domain") == "unknown" for d in observed.values()),
+                "Date uncertain": sum(d.get("age") == "unknown" for d in observed.values()),
+                "Eligibility passed": by_portal[portal]["relevant"],
+                "Held for review": len({e.job_id for e in portal_events if e.type == "result_manual_action_required"
+                                        or decided.get(e.job_id, ("",))[0] == "review"}),
+                "Application attempts": sum(e.type == "apply_started" for e in portal_events),
+                "Confirmed": len(confirmed), "Failed attempts": len(failures),
+                "Relevant conversion (%)": round(100 * len(confirmed & relevant) / len(relevant), 1) if relevant else None,
+                "Fresh and relevant (%)": round(100 * len(fresh & relevant) / unique, 1) if unique else None,
+            }
+            if audit and profile is not None:
+                skipped = [jobs[j] for j, (outcome, _, _) in decided.items()
+                           if jobs[j].portal == portal and outcome in {"skipped", "skipped_title"}]
+                checked = audit_skips(profile, skipped)
+                metrics["Skips upheld by audit"] = checked["still_skipped"]
+                metrics["Previously skipped, now eligible for matching"] = checked["would_apply"]
+                metrics["Skips requiring another look"] = checked["would_read_first"] + checked["would_put_to_you"]
+            out["portal_metrics"][portal] = {"metrics": metrics, "failures": failures, "listings": details}
     if audit and profile is not None:
         out["audit"] = audit_skips(profile, [jobs[j] for j, (o, _w, _s) in decided.items()
                                              if o in {"skipped", "skipped_title"} and j in jobs])

@@ -321,7 +321,10 @@ def decide(before: PageState, after: PageState, *, network: list[NetworkHit] | N
                                "confirmation - it may want you to sign in or enter a code before the application counts")
     kinds = {s.name for s in support if s.strength == "supporting"}
     content = kinds & {"acknowledgement", "submit_request_accepted", "reference_shown"}
-    if content and len(kinds) >= 2:
+    # Navigation to an unrelated page removes the form and its button together. A generic success flag
+    # does not confirm the application there without an acknowledgement, reference or confirmation URL.
+    acknowledged = kinds & {"acknowledgement", "reference_shown", "confirmation_url"}
+    if content and len(kinds) >= 2 and (not url_changed or acknowledged):
         text = next((s.detail for s in support if s.name == "acknowledgement"), "") or "Submission accepted by the site"
         return Verdict(SubmissionState.CONFIRMED, support, confirmation_text=text.rsplit(" (", 1)[0])
     if net_fail and not form_gone:

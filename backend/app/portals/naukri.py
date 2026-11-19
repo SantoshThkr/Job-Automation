@@ -183,7 +183,10 @@ class NaukriAdapter(PortalAdapter):
             new = 0
             for c in cards:
                 job = self._card_to_job(c)
-                if job is None or job.external_id in seen:
+                if job is None:
+                    continue
+                if job.external_id in seen:
+                    query.repeat_sightings += 1
                     continue
                 seen.add(job.external_id)
                 new += 1

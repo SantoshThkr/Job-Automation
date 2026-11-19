@@ -6,7 +6,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.answers.question_bank import Answer, QuestionContext, normalize_question
@@ -118,8 +118,9 @@ def find_duplicate(s: Session, job: Job, days: int = 60) -> Job | None:
         select(Job).where(
             Job.fingerprint == job.fingerprint,
             Job.id != job.id,
-            Job.status.in_([JobStatus.APPLIED, JobStatus.ALREADY_APPLIED, JobStatus.APPLYING,
-                            JobStatus.AWAITING_APPROVAL]),
+            or_(Job.status.in_([JobStatus.APPLIED, JobStatus.ALREADY_APPLIED, JobStatus.APPLYING,
+                                JobStatus.AWAITING_APPROVAL]), Job.application.has(Application.submit_attempted.is_(True)),
+                Job.application.has(Application.confirmed.is_(True))),
             Job.updated_at >= since,
         ).limit(1)
     )

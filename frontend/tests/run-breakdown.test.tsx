@@ -80,3 +80,20 @@ describe("a run's breakdown", () => {
     expect((await screen.findByTestId("run-audit")).textContent).toContain("10 read before deciding");
   });
 });
+
+it("shows confirmation conversion and the reason for a failed attempt per portal", async () => {
+  api.runBreakdown.mockResolvedValue({
+    ...run76,
+    portal_metrics: {
+      linkedin: {
+        metrics: { Confirmed: 2, "Relevant conversion (%)": 25 },
+        failures: [{ id: 7, reason: "The application form returned HTTP 500" }],
+      },
+    },
+  });
+  render(<RunBreakdown runId={76} />);
+  const heading = await screen.findByText("Portal results");
+  const table = heading.nextElementSibling!.querySelector("table")!;
+  expect(within(table).getByText("25")).toBeTruthy();
+  expect(await screen.findByText(/application form returned HTTP 500/)).toBeTruthy();
+});

@@ -21,7 +21,7 @@ import logging
 import random
 import re
 import socket
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable
 from datetime import timedelta
 from types import SimpleNamespace
@@ -53,8 +53,10 @@ from app.engine.recorder import (
     start_application,
     upsert_job,
 )
+from app.matching.analyzer import classify_title
 from app.matching.matcher import JobMatcher
 from app.matching.posting import Window, listing_closed, posted_of, verdict, window_to_dict
+from app.matching.reasons import code_of
 from app.matching.rules import decision_reason, title_prescreen
 from app.models import (
     ActualState,
@@ -67,6 +69,7 @@ from app.models import (
     utcnow,
 )
 from app.portals.base import PortalAdapter, SearchQuery
+from app.portals.queries import frontend_queries
 from app.portals.types import ApplyOutcome, ApplyResult, JobPosting
 from app.profile import Profile, blocking_issues, get_profile_store
 from app.resumes import get_resume, select_resume
@@ -80,7 +83,7 @@ AdapterFactory = Callable[[str, BrowserEngine], PortalAdapter | None]
 # made 65 Instahyre searches (5 queries x 13 cities) that listed the same few dozen jobs - 1 300 sightings, 1 new job
 REDUNDANT_SEARCHES = 3
 
-_HANDLED = {JobStatus.APPLIED, JobStatus.ALREADY_APPLIED, JobStatus.DUPLICATE, JobStatus.SKIPPED,
+_HANDLED = {JobStatus.PARKED, JobStatus.APPLIED, JobStatus.ALREADY_APPLIED, JobStatus.DUPLICATE, JobStatus.SKIPPED,
             JobStatus.REVIEW_PENDING, JobStatus.MANUAL_ACTION_REQUIRED, JobStatus.DRY_RUN, JobStatus.FAILED,
             JobStatus.AWAITING_APPROVAL, JobStatus.APPLYING, JobStatus.QUEUED, JobStatus.EXPIRED}
 
@@ -152,6 +155,7 @@ class Orchestrator:
         self._unregistered: dict[str, list[int]] = {}  # portal -> jobs whose Apply click verifiably did nothing
         self.adapter_factory = adapter_factory
         self.adapters: dict[str, PortalAdapter] = {}
+        self.portal_stats: dict[str, Counter[str]] = defaultdict(Counter)
         self.stats: Counter[str] = Counter()
         self.run_id: int | None = None
         self.mode = AgentMode.DRY_RUN
@@ -222,6 +226,9 @@ class Orchestrator:
         self.mode = AgentMode(snap.mode) if snap.mode in {m.value for m in AgentMode} else AgentMode.DRY_RUN
         portals = [p for p in (snap.portals or self.profile.search.portals)]
         self.stats = Counter()
+        self.portal_stats = defaultdict(Counter, {p: Counter(sightings=0) for p in portals})
+        self.adapters.clear()
+        self.portal_limits.clear()
         self.logged_out = {}  # a new run tries every portal again (you may have logged in meanwhile)
         self.broke_this_run = set()
         self.seen_this_run = set()
@@ -235,15 +242,16 @@ class Orchestrator:
         self._event(None, "run_started", f"Run #{self.run_id} started ({self.mode.value}; portals: {', '.join(portals)})")
         status, error = "COMPLETED", ""
         try:
-            self.recover_interrupted()
+            if not self.search_only:
+                self.recover_interrupted()
             from app.engine.recency import current_window
 
             self.window = current_window()
             self._event(None, "recency", f"Job recency for this run: {self.window.label()} (chosen in the dashboard; "
                                          "older postings are not applied to)")
-            if self.only_jobs is None:
+            if self.only_jobs is None and not self.search_only:
                 self._release_recency_skips()
-            if self.only_jobs is None and _settings().reconsider_skipped:
+            if self.only_jobs is None and not self.search_only and _settings().reconsider_skipped:
                 self._reconsider_skipped()
             await self._report_ai_status()
             if await self._memory_blocked():  # out of memory before anything started: no browser is opened at all
@@ -265,6 +273,8 @@ class Orchestrator:
                 if await self._memory_blocked():
                     self._event(None, "limit", f"{portal}: no new search - the run stopped for lack of memory")
                     continue
+                if self.portal_stats[portal]["confirmed"] >= 10:
+                    continue
                 if self.max_applications and self._limits_reached():
                     self._event(None, "limit", f"{portal}: application cap of this run reached - no new search")
                     continue
@@ -283,7 +293,8 @@ class Orchestrator:
                 if run is not None:
                     run.status = status
                     run.error = error
-                    run.stats = dict(self.stats)
+                    run.stats = {**self.stats, **{f"portal.{p}.{k}": v for p, counts in self.portal_stats.items()
+                                                  for k, v in counts.items()}}
                     run.finished_at = utcnow()
             summary = _summary(self.stats)
             if self.assistant is not None:  # free the model's memory now, not after its keep-alive
@@ -529,6 +540,9 @@ class Orchestrator:
         logged_in: set[str] = set()
         for n, (job_id, portal, posting) in enumerate(items):
             await self.control.checkpoint()
+            if self.portal_stats[portal]["confirmed"] >= 10:
+                self.stats["deferred"] += 1
+                continue
             reason = self._limits_reached()
             if reason:
                 left = len(items) - n
@@ -618,11 +632,15 @@ class Orchestrator:
         years = self.profile.professional.total_experience_years if search.use_experience_filter else None
         searches = 0
         redundant = 0  # searches in a row that brought no listing new to this run
-        for keywords in search.queries:
-            for location in (search.locations or [""]):
+        queries = frontend_queries(portal, search.queries)
+        locations = list(dict.fromkeys(search.locations or [""]))
+        # Sample different cities and role variants before deciding the feed is repeating.
+        for rotation in range(len(queries)):
+            for index, location in enumerate(locations):
+                keywords = queries[(rotation + index) % len(queries)]
                 await self.control.checkpoint()
                 if redundant >= REDUNDANT_SEARCHES:
-                    left = len(search.queries) * len(search.locations or [""]) - searches
+                    left = len(queries) * len(locations) - searches
                     self._event(None, "limit", f"{adapter.display_name}: the last {REDUNDANT_SEARCHES} searches listed "
                                                f"only jobs already seen in this run - its {left} remaining search(es) "
                                                "are skipped (the portal shows the same listings whatever is asked)")
@@ -648,13 +666,16 @@ class Orchestrator:
                     async for posting in adapter.search(q):
                         found += 1
                         self.stats["discovered"] += 1
+                        self.portal_stats[portal]["sightings"] += 1
                         key = (posting.portal, posting.external_id)
                         if key in self.seen_this_run:
                             self.stats["repeat_sightings"] += 1
-                        else:
-                            self.seen_this_run.add(key)
-                            self.stats["unique_listings"] += 1
-                            fresh += 1
+                            self.stats["seen_before"] += 1
+                            continue
+                        self.seen_this_run.add(key)
+                        self.stats["unique_listings"] += 1
+                        self.portal_stats[portal]["unique"] += 1
+                        fresh += 1
                         if self.stats["discovered"] % 10 == 0:
                             await self._resources("discovery", discovered=self.stats["discovered"])
                         await self.control.checkpoint()
@@ -669,12 +690,51 @@ class Orchestrator:
                             self.stats["job_errors"] += 1
                             shot = await self._safe_capture(f"job-{posting.portal}-{posting.external_id}")
                             self._mark_error(posting, exc, shot)
+                        self._record_listing(posting)
                 except NavigationFailed as exc:
                     if is_network_error(exc):
                         raise
                     self._event(None, "search_failed", f"{label}: {exc}", level="error")
+                finally:
+                    # Adapters collapse repeated cards within a query so they never consume the detail budget.
+                    repeats = q.repeat_sightings
+                    self.stats["discovered"] += repeats
+                    self.stats["repeat_sightings"] += repeats
+                    self.stats["seen_before"] += repeats
+                    self.portal_stats[portal]["sightings"] += repeats
+                    found += repeats
                 self._event(None, "search_done", f"{label}: {found} job(s) found, {fresh} not already seen in this run")
                 redundant = redundant + 1 if found and not fresh else 0
+                if not self.search_only and self.mode != AgentMode.DRY_RUN and fresh:
+                    await self.process_queue([portal])
+                    if self.portal_stats[portal]["confirmed"] >= 10 or self._limits_reached() or portal in self.logged_out:
+                        return
+
+    def _record_listing(self, posting: JobPosting) -> None:
+        """Snapshot each unique sighting, including previously evaluated jobs, for this run's denominator."""
+        with session_scope() as s:
+            job = s.scalar(select(Job).where(Job.portal == posting.portal, Job.external_id == posting.external_id))
+            if job is None:
+                return
+            details = job.match_details or {}
+            analysis = details.get("analysis") or {}
+            codes = {code_of(reason) for reason in details.get("blockers", [])}
+            off_domain = codes & {"TITLE_OTHER_FAMILY", "FRONTEND_SHARE_LOW", "FULLSTACK_BACKEND_HEAVY",
+                                  "CMS_ROLE", "PLATFORM_ROLE", "DESIGN_ROLE", "SPECIALTY_ROLE"}
+            domain = "unknown"
+            category = analysis.get("title_category") or classify_title(job.title or "")
+            if off_domain or category in {"devops", "mobile", "data", "qa", "backend"}:
+                domain = "irrelevant"
+            elif any(f.startswith("Responsibilities include") for f in details.get("flags", [])):
+                domain = "unknown"
+            elif job.decision == Decision.APPLY or (analysis.get("frontend_skills") and
+                    (analysis.get("frontend_ratio") or 0) >= self.profile.job_preferences.min_frontend_ratio):
+                domain = "relevant"
+            posted = posted_of(job)
+            age = verdict(posted, self.window)[0] if posted else "unknown"
+            add_event(s, job.id, "listing_seen", job.status_reason or job.status, run_id=self.run_id,
+                      data={"age": age, "domain": domain, "status": job.status})
+
 
     def _mark_error(self, posting: JobPosting, exc: Exception, shot: str | None) -> None:
         with session_scope() as s:
@@ -695,10 +755,11 @@ class Orchestrator:
             job_id = job.id
             if created:
                 self.stats["new_jobs"] += 1
-            if not created and job.status in _HANDLED and not _worth_another_look(job):
+            badge_updates_queue = posting.already_applied and job.status == JobStatus.QUEUED and not _unfinished_elsewhere(job)
+            if not created and job.status in _HANDLED and not badge_updates_queue and not _worth_another_look(job):
                 self.stats["seen_before"] += 1
                 return
-            if not created and job.status in _HANDLED:
+            if not created and job.status in _HANDLED and not badge_updates_queue:
                 add_event(s, job.id, "another_look", f"Listed again by {adapter.display_name}: read again (it had "
                                                      f"been set aside as: {(job.status_reason or job.status)[:160]})",
                           run_id=self.run_id)
@@ -715,6 +776,14 @@ class Orchestrator:
                 set_status(s, job, JobStatus.DUPLICATE, f"Same role already handled via {dup.portal} (job #{dup.id})")
                 add_event(s, job.id, "duplicate", job.status_reason, run_id=self.run_id)
                 self.stats["duplicates"] += 1
+                return
+            state, why = verdict(posted_of(job), self.window)
+            if state == "out" and (posting.posted_at or posting.posted_text) and not posting.details_loaded:
+                job.match_details = {**(job.match_details or {}), "recency_skip": window_to_dict(self.window),
+                                     "unread_card": True}
+                set_status(s, job, JobStatus.SKIPPED, why)
+                add_event(s, job.id, "recency", why, run_id=self.run_id, data={"stage": "search"})
+                self.stats["too_old"] += 1
                 return
             early = title_prescreen(self.profile, posting.title)
             if early:
@@ -774,6 +843,7 @@ class Orchestrator:
             save_match(s, job, result.to_dict())
             add_event(s, job.id, "evaluated", f"{decision.value} (score {result.score}): {why}"[:1000],
                       run_id=self.run_id, data={"score": result.score, "decision": decision.value,
+                                                "age": age_state, "match_decision": result.decision,
                                                 "resume": result.resume_id, "priority": result.priority})
             if decision == Decision.SKIP:
                 set_status(s, job, JobStatus.SKIPPED, why or "Not relevant")
@@ -858,6 +928,10 @@ class Orchestrator:
             if resume is not None and not resume.absolute_path.is_file():
                 resume = select_resume(profile, category, job.skills or [])
             previous = job.application
+            if previous is not None and previous.confirmed:
+                self.stats["apply_attempts"] -= 1
+                set_status(s, job, JobStatus.APPLIED, previous.confirmation_text or "Application history shows it as applied")
+                return ApplyResult(ApplyOutcome.ALREADY_APPLIED, job.status_reason)
             if previous is not None and previous.verify_requested:
                 verify_only = True
             else:
@@ -900,9 +974,16 @@ class Orchestrator:
         async def on_submit() -> None:
             with session_scope() as s:
                 a = s.get(Application, app_id)
-                if a is not None:
-                    a.submit_attempted = True
-                    a.last_step = "submit_clicked"
+                job = s.get(Job, job_id)
+                if job is None or a is None or a.confirmed or job.status not in {
+                    JobStatus.APPLYING, JobStatus.AWAITING_APPROVAL
+                }:
+                    raise ManualActionRequired("Application history changed before submission. Review this listing.")
+                duplicate = find_duplicate(s, job)
+                if duplicate is not None:
+                    raise ManualActionRequired(f"Same role already handled via {duplicate.portal} (job #{duplicate.id})")
+                a.submit_attempted = True
+                a.last_step = "submit_clicked"
                 add_event(s, job_id, "submit", "Submitting application", application_id=app_id, run_id=self.run_id)
 
         async def on_step(description: str, url: str) -> None:
@@ -1208,6 +1289,8 @@ class Orchestrator:
             job = s.get(Job, job_id)
             app = s.get(Application, app_id)
             assert job is not None and app is not None
+            if app.confirmed and status != JobStatus.APPLIED:
+                return  # a manual confirmation recorded while the form was open takes precedence
             app.finished_at = utcnow()
             app.ats_platform = result.ats or app.ats_platform
             app.final_url = result.external_url or app.final_url or job.url
@@ -1220,6 +1303,7 @@ class Orchestrator:
                 app.verification_checked_at = utcnow()
             reason = result.message
             if status == JobStatus.APPLIED:
+                self.portal_stats[job.portal]["confirmed"] += 1
                 app.confirmed = True
                 app.confirmation_text = result.confirmation_text[:2000]
                 app.applied_at = utcnow()

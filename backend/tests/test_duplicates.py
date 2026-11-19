@@ -82,3 +82,12 @@ def test_applied_and_possibly_sent_jobs_are_not_requeued_by_a_click(api):
         assert s.get(Job, unsure_id).status == JobStatus.MANUAL_ACTION_REQUIRED
     # only your explicit confirmation (after checking the site) lets it be tried again
     assert api.post(f"/api/jobs/{unsure_id}/action", json={"action": "retry", "force": True}).status_code == 200
+
+
+def test_unconfirmed_submit_holds_duplicate_on_other_portal(clean_db):
+    with session_scope() as db:
+        first = _job(db, "linkedin", "uncertain")
+        application = start_application(db, first, AgentMode.AUTO, resume_id=None, resume_path=None)
+        application.submit_attempted = True
+        set_status(db, first, JobStatus.MANUAL_ACTION_REQUIRED, "Confirmation still pending")
+        assert find_duplicate(db, _job(db, "naukri", "duplicate")).id == first.id

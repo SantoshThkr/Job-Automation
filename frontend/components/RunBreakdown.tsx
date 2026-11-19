@@ -56,6 +56,27 @@ export function RunBreakdown({ runId }: { runId: number }) {
           {data.reconciles ? "Reconciles: " : "Does not reconcile: "}{data.reconciliation}</li>
       </ul>
 
+      {data.portal_metrics && <>
+        <h3>Portal results</h3>
+        <div className="table-wrap"><table className="runs">
+          <thead><tr><th>Measure</th>{Object.keys(data.portal_metrics).map(p => <th key={p}>{PORTAL_LABEL[p] ?? p}</th>)}</tr></thead>
+          <tbody>{Object.keys(Object.values(data.portal_metrics)[0]?.metrics ?? {}).map(label => (
+            <tr key={label}><td>{label}</td>{Object.entries(data.portal_metrics!).map(([portal, row]) =>
+              <td key={portal} className="num">{row.metrics[label] ?? "—"}</td>)}</tr>
+          ))}</tbody>
+        </table></div>
+        <p className="small muted">Conversion counts confirmations among the unique relevant listings seen in this run. Fresh and relevant listings are a percentage of all unique listings.</p>
+        {Object.entries(data.portal_metrics).map(([portal, row]) => row.listings?.length ? (
+          <details key={portal}><summary>{PORTAL_LABEL[portal]} listing decisions ({row.listings.length})</summary>
+            <ul className="list small">{row.listings.map(job => (
+              <li key={job.id}><Link href={`/jobs/${job.id}`}>{job.title}</Link> · {job.status} · {job.reason}</li>
+            ))}</ul>
+          </details>
+        ) : null)}
+        {Object.entries(data.portal_metrics).flatMap(([portal, row]) => row.failures.map((f, index) => (
+          <p key={portal + index} className="small"><Link href={`/jobs/${f.id}`}>{PORTAL_LABEL[portal]} #{f.id}</Link> · {f.reason}</p>
+        )))}
+      </>}
       <h3>{d.jobs} job(s) decided in this run</h3>
       <div className="table-wrap">
         <table className="runs">

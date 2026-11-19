@@ -160,6 +160,8 @@ def classify_title(title: str) -> str:
     t = _tidy_title(title)
     says_frontend = bool(re.search(r"front[\s-]?end", t, re.I))
     for cat, pattern in _TITLE_CATEGORIES:
+        if cat == "devops" and re.search(r"front[\s-]?end[\s-]+platform\b", t, re.I):
+            continue
         if cat == "data" and says_frontend:
             continue  # "Senior Frontend Developer (Analytics)" names a domain, not a data role
         if re.search(pattern, t, re.I):
@@ -379,7 +381,7 @@ def parse_work_mode(location: str, description: str) -> str:
         return "remote"
     if _HYBRID.search(location or ""):
         return "hybrid"
-    head = (description or "")[:1500]
+    head = f"{location or ''}\n{(description or '')[:1500]}"
     if re.search(r"\b(?:fully|100%)\s+remote\b|\bremote[\s-](?:first|only)\b", head, re.I):
         return "remote"
     if _HYBRID.search(head):
@@ -434,29 +436,38 @@ def required_skills_from_sections(description: str) -> tuple[set[str], set[str],
     """Returns (required, optional, sections_found)."""
     required: set[str] = set()
     optional: set[str] = set()
+    elsewhere: set[str] = set()
     section = "none"
     found_sections = False
-    for line in (description or "").splitlines():
+    for line in re.split(r"[\n;]|(?<=[.!?])\s+(?=[A-Z])", description or ""):
         stripped = line.strip(" \t-•*#")
-        if _is_header(stripped):
-            if _OPTIONAL_HDR.search(stripped):
-                section, found_sections = "optional", True
+        heading, colon, rest = stripped.partition(":")
+        if _is_header(heading):
+            if _OPTIONAL_HDR.search(heading):
+                optional |= set(extract_skills(stripped))
+                # "Python preferred" qualifies this item only. A section heading governs subsequent items.
+                if not extract_skills(heading):
+                    section, found_sections = "optional", True
                 continue
-            if _REQUIRED_HDR.search(stripped):
+            if _REQUIRED_HDR.search(heading):
                 section, found_sections = "required", True
-                # header lines like "Required: React, TypeScript" carry skills too
-                if ":" in stripped:
-                    required |= set(extract_skills(stripped.split(":", 1)[1]))
+                required |= set(extract_skills(stripped))
                 continue
-            if _OTHER_HDR.search(stripped):
+            if _OTHER_HDR.search(heading):
                 section, found_sections = "other", True
+                elsewhere |= set(extract_skills(rest if colon else stripped))
                 continue
+        if _OPTIONAL_HDR.search(stripped) or re.search(r"\b(?:is|are) a plus\b", stripped, re.I):
+            optional |= set(extract_skills(stripped))
+            continue
         skills = set(extract_skills(stripped))
         if section == "required":
             required |= skills
         elif section == "optional":
             optional |= skills
-    return required, optional - required, found_sections
+        else:
+            elsewhere |= skills
+    return required, optional - required - elsewhere, found_sections
 
 
 # ------------------------------------------------------------- analysis ---
@@ -473,12 +484,14 @@ def analyze_job(job: JobInput) -> JobAnalysis:
         if skill_def(canon):
             skills[canon] = skills.get(canon, 0) + 1
 
-    required, _optional, sections = required_skills_from_sections(job.description)
+    required, optional, sections = required_skills_from_sections(job.description)
     tag_skills = {canonicalize(t) for t in job.skills if skill_def(canonicalize(t))}
     title_skills = set(extract_skills(job.title))
     if not sections:
-        required = {s for s, n in skills.items() if n >= 2}
-    required |= title_skills | tag_skills
+        required = {s for s, n in skills.items() if n >= 2 and s not in optional}
+    required |= title_skills | (tag_skills - optional)
+    optional -= required
+    skills = {name: count for name, count in skills.items() if name not in optional}
     signal_only = {s.name for s in all_skills() if s.signal_only}
     required -= signal_only
 

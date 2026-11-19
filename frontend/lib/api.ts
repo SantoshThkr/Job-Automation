@@ -341,6 +341,11 @@ export interface JobList {
 
 /** One run, reconciled (GET /api/agent/runs/{id}/breakdown). */
 export interface RunBreakdown {
+  portal_metrics?: Record<string, {
+    metrics: Record<string, number | null>;
+    failures: { id: number; reason: string }[];
+    listings?: { id: number; title: string; status: string; reason: string }[];
+  }>;
   run: { id: number; mode: string; status: string; portals: string[] };
   funnel: {
     sightings: number;

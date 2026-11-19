@@ -66,17 +66,27 @@ async def extract_cards(page: Page, card_selectors: list[str], fields: dict[str,
 
 
 _LD_DATES_JS = r"""() => {
-  const out = {};
-  for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
-    const t = s.textContent || '';
-    if (!/JobPosting/i.test(t)) continue;  // only the job's own structured data, never a widget's
-    for (const k of ['datePosted', 'validThrough']) {
-      // (a regex literal: in a string, '\s' would be a plain 's' - and pretty-printed JSON, "datePosted": "...", missed)
-      const m = t.match(k === 'datePosted' ? /"datePosted"\s*:\s*"([^"]{8,40})"/ : /"validThrough"\s*:\s*"([^"]{8,40})"/);
-      if (m && !out[k]) out[k] = m[1];
-    }
+  const postings = [];
+  const visit = node => {
+    if (Array.isArray(node)) { node.forEach(visit); return; }
+    if (!node || typeof node !== 'object') return;
+    const types = [node['@type']].flat();
+    if (types.some(t => typeof t === 'string' && /(?:^|[/#])JobPosting$/i.test(t))) postings.push(node);
+    if (node['@graph']) visit(node['@graph']);
+    if (node.mainEntity) visit(node.mainEntity);
+  };
+  for (const script of document.querySelectorAll('script[type="application/ld+json"]')) {
+    try { visit(JSON.parse(script.textContent)); } catch { /* another JSON-LD block may be valid */ }
   }
-  return out;
+  const path = url => {
+    try { const u = new URL(url, location.href); return u.origin + u.pathname.replace(/\/$/, ''); }
+    catch { return ''; }
+  };
+  const own = postings.filter(p => typeof p.url === 'string' && path(p.url) === path(location.href));
+  const candidates = own.length ? own : postings;
+  if (candidates.length !== 1) return {};
+  const {datePosted, validThrough} = candidates[0];
+  return {datePosted, validThrough};
 }"""
 
 

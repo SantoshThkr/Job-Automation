@@ -68,6 +68,21 @@ def keyword_in(keyword: str, text: str) -> bool:
     return re.search(left + re.escape(kw) + right, text.lower()) is not None
 
 
+def _excluded_title_keyword(profile: Profile, title: str) -> str | None:
+    variants = [title, normalize_title_aliases(title)]
+    for keyword in profile.job_preferences.excluded_title_keywords:
+        if not any(keyword_in(keyword, v) for v in variants):
+            continue
+        # The profile excludes ML roles. A frontend role can explicitly name ML as its product domain.
+        if keyword.strip().lower() == "machine learning" and re.search(
+            r"\b(?:front[ -]?end|ui|react|next\.?js) (?:engineer|developer)\b.*?\bmachine learning\b"
+            r"(?![ -]+(?:engineer|developer|scientist))", title, re.I
+        ):
+            continue
+        return keyword.strip()
+    return None
+
+
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9+#. ]+", " ", (s or "").lower()).strip()
 
@@ -92,11 +107,9 @@ class _Ctx:
 def _score_title(profile: Profile, job: JobInput, a: JobAnalysis, ctx: _Ctx) -> float:
     prefs = profile.job_preferences
     title = _norm(job.title)
-    variants = [job.title, normalize_title_aliases(job.title)]
-    for kw in prefs.excluded_title_keywords:
-        if any(keyword_in(kw, v) for v in variants):
-            ctx.blockers.append(f"Title contains excluded keyword '{kw.strip()}'")
-            return 0.0
+    if keyword := _excluded_title_keyword(profile, job.title):
+        ctx.blockers.append(f"Title contains excluded keyword '{keyword}'")
+        return 0.0
     best_target = max((fuzz.token_set_ratio(title, _norm(t)) for t in prefs.target_titles), default=0)
     best_accept = max((fuzz.token_set_ratio(title, _norm(t)) for t in prefs.acceptable_titles), default=0)
     cat = a.title_category
@@ -296,29 +309,32 @@ def _score_location(profile: Profile, job: JobInput, a: JobAnalysis, ctx: _Ctx) 
     pref_cities = {c for p in prefs if (c := normalize_city(p))}
     wants_remote = wp.open_to_remote or any(p.lower() == "remote" for p in prefs)
     locs, mode = a.locations, a.work_mode
-    if not prefs:
-        return 80.0
     if "remote" in locs or mode == "remote":
         if wants_remote:
             ctx.reasons.append("Location: remote role")
             return 100.0
-        ctx.reasons.append("Location: remote role (you prefer office)")
+        ctx.flags.append("Remote role but you are not open to remote work")
         return 50.0
+    if mode == "onsite" and not wp.open_to_onsite:
+        ctx.flags.append("On-site role but you are not open to on-site work")
+        return 40.0
+    if mode == "hybrid" and not wp.open_to_hybrid:
+        ctx.flags.append("Hybrid role but you are not open to hybrid work")
+        return 50.0
+    if not prefs:
+        return 80.0
     matched = [loc for loc in locs if loc in pref_cities]
     if matched:
-        if mode == "onsite" and not wp.open_to_onsite:
-            ctx.flags.append("On-site role but you are not open to on-site work")
-            return 40.0
-        if mode == "hybrid" and not wp.open_to_hybrid:
-            ctx.flags.append("Hybrid role but you are not open to hybrid work")
-            return 50.0
         ctx.reasons.append(f"Location: {matched[0].title()} matches your preference")
         return 100.0
     if "anywhere" in locs:
         ctx.reasons.append("Location: multiple / pan-India locations")
         return 85.0
     if not locs:
-        ctx.reasons.append("Location not stated")
+        if profile.matching.location_strict and not wp.willing_to_relocate:
+            ctx.flags.append(f"Location could not be verified against your preferences ({job.location or 'not stated'})")
+        else:
+            ctx.reasons.append("Location not stated")
         return 65.0
     if wp.willing_to_relocate:
         ctx.reasons.append(f"Location: {job.location} (you are open to relocation)")
@@ -410,6 +426,35 @@ def evaluate_rules(profile: Profile, job: JobInput, analysis: JobAnalysis | None
         elif foreign_req:
             ctx.flags = [f"{f[:-1]}; not among your skills: {', '.join(foreign_req[:4])})"
                          if f.startswith("Full-stack role is backend-heavy") and f.endswith(")") else f for f in ctx.flags]
+    if a.title_category in {"generic", "fullstack", "other"}:
+        model_work = re.search(r"\b(?:train(?:ing)?|fine[- ]tun(?:e|ing)|evaluat(?:e|ing))\s+(?:and\s+\w+\s+)?"
+                               r"(?:machine learning |deep learning |language |ML |foundation )?models?\b",
+                               job.description, re.I)
+        if model_work and len(a.frontend_skills) <= 1:
+            ctx.flags.append("Model training or evaluation responsibilities with little evidence of frontend work")
+        # Compare the work assigned in the responsibilities section. A long skills list alone can
+        # make an infrastructure-heavy job look like frontend engineering.
+        duties = re.search(r"(?:key\s+)?responsibilities\s*:?\s*\n(.*?)(?=\n[^\n]{0,20}(?:skills|qualifications|requirements)\b|\Z)",
+                           job.description, re.I | re.S)
+        if duties:
+            lines = duties.group(1).splitlines()
+            front = sum(bool(re.search(r"front[ -]?end|\bUI\b|interfaces?|\bReact\b|Next\.js", line, re.I))
+                        for line in lines)
+            back = sum(bool(re.search(r"back[ -]?end|databases?|cloud (?:services|infrastructure)|serverless",
+                                      line, re.I)) for line in lines)
+            if back >= 3 and back > front:
+                ctx.flags.append(f"Responsibilities include {back} backend or infrastructure duties and {front} "
+                                 "frontend duties. Check the frontend share.")
+    requirement = re.search(r"must have (?:hands[ -]on )?experience (?:building|developing) ([^.,;\n]{4,70})",
+                            job.description, re.I)
+    if requirement:
+        product = requirement.group(1).strip()
+        if re.search(r"websites?|platforms?|booking systems?|products?", product, re.I):
+            history = " ".join([profile.professional.summary, *profile.professional.highlights,
+                                *(w.summary for w in profile.professional.work_history),
+                                *(p.description for p in profile.projects)])
+            if product.casefold() not in history.casefold():
+                ctx.flags.append(f"Check mandatory product experience against your work history: {product}")
     _employment_and_kind(job, a, ctx)
     if ctx.heavy_stack:
         pct = round((ratio or 0) * 100)
@@ -558,6 +603,7 @@ def preferences_rev(profile: Profile) -> str:
 
     wp = profile.work_preferences
     data = {
+        "matcher_version": 2,
         "job": profile.job_preferences.model_dump(mode="json"),
         "matching": profile.matching.model_dump(mode="json"),
         "work": {"locations": sorted(p.strip().lower() for p in wp.preferred_locations), "remote": wp.open_to_remote,
@@ -593,11 +639,8 @@ def title_prescreen(profile: Profile, title: str) -> list[str]:
     from app.matching.analyzer import classify_title, title_seniority
 
     reasons: list[str] = []
-    variants = [title, normalize_title_aliases(title)]
-    for kw in profile.job_preferences.excluded_title_keywords:
-        if any(keyword_in(kw, v) for v in variants):
-            reasons.append(f"Title contains excluded keyword '{kw.strip()}'")
-            return reasons
+    if keyword := _excluded_title_keyword(profile, title):
+        return [f"Title contains excluded keyword '{keyword}'"]
     level = title_seniority(title)
     if level == "intern":
         reasons.append("Internship/trainee role")
