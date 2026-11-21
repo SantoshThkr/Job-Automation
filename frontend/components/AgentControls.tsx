@@ -28,7 +28,8 @@ export function AgentControls({ agent, onChange, defaultPortals }: {
 }) {
   const { busy, error, run } = useAction();
   const [mode, setMode] = useState<Mode>("dry_run");
-  const [portals, setPortals] = useState<Portal[]>(defaultPortals);
+  const [savedPortals, setPortals] = useState<Portal[]>(defaultPortals);
+  const portals = PORTALS.filter((portal) => savedPortals.includes(portal));
   const [touched, setTouched] = useState(false);
 
   useEffect(() => {
